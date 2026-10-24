@@ -1,6 +1,7 @@
 # 可达书柜（mangagate）开发记录（面向后续维护者 / AI）
 
-最后更新：2026-10-24，对应版本 **0.3.0**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
+最后更新：2026-10-23，对应版本 **0.4.0**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
+当前发布渠道：GitHub Releases（每个 tag 挂 `mangagate.fpk`）。
 
 这份文档记录「为什么这么做」和「踩过哪些坑」，README.md 只讲用户怎么装怎么用。
 接手前请先通读本文，再改代码。
@@ -94,12 +95,12 @@ python3 tools/smoke_test.py --base http://127.0.0.1:5080 \
 | `epub.go` | epub OPF / cbz ComicInfo.xml 内嵌元数据提取、封面声明解析（含 URL 转义） | `archiveMetadata`, `epubMetadata`, `comicInfoMetadata`, `opfCoverPath`, `plainText` |
 | `scrape.go` | 刮削：AniList/Bangumi 双源客户端、搜索词清洗、置信度判断、元数据覆盖层（含建议/忽略） | `newScraper`, `Search`, `Subject`, `cleanSearchTerm`, `scrapeConfident`, `metaStore.*`, `dirPerm` 在 opds.go |
 | `opds.go` | OPDS 1.2 feed（根/书库/系列/最近添加/搜索，全部分页）、目录权限过滤、下载、封面路由、dc 元数据 | `handleOPDS`, `serveRootFeed`, `serveLibraryFeed`, `serveRecent`, `pageEntries`, `reqPerm`, `bookEntry`, `serveBookFile` |
-| `cover.go` | 封面链（刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、320px JPEG 缓存 | `coverJPEG`, `scrapedCoverJPEG`(opds.go), `extractCoverImage`, `imageFromZipEntry`, `encodeCover` |
+| `cover.go` | 封面链（刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、320px JPEG 缓存、受控解码（`decodeLimited`） | `coverJPEG`, `scrapedCoverJPEG`(opds.go), `extractCoverImage`, `imageFromZipEntry`, `decodeLimited`, `encodeCover` |
 | `tls.go` | 同端口 HTTP/HTTPS 协议识别、证书加载 | `loadTLSConfig`, `sniffListener` |
-| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、日志、导入导出 | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `runAutoScrape`, `applySubject`, `startScan`, `apiImport`, `apiExport` |
+| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、日志、导入导出、输入校验（`validUsername` / `validScrapeID`） | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `runAutoScrape`, `applySubject`, `startScan`, `apiImport`, `apiExport`, `validUsername`, `validScrapeID` |
 | `admin.html` | 管理页前端（内嵌 `go:embed`，相对路径请求） | — |
 | `util.go` | MIME、ID、LAN IP 探测、日志尾部读取 | `hashID`, `detectLANIP`, `readLogTail` |
-| `*_test.go` | 单元测试（清洗/置信度/归并/epub 解析/扫描器/多根前缀/异常/缓存回路/分页） | `go test .` |
+| `*_test.go` | 单元测试（清洗/置信度/归并/epub 解析/扫描器/多根前缀/异常/缓存回路/分页/受控解码/输入校验） | `go test .` |
 
 ### 数据模型
 
@@ -311,9 +312,39 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
 `tools/icon.png` 是图标源（随仓库），`gen_icon.go` 存在它时缩放出
 ICON.PNG / ICON_256.PNG / ui/images/icon_{64,256}.png 四个尺寸，否则绘制
 默认书本图形。注意 `gen_icon.go` 依赖 `x/image`，必须在 `src/` 模块目录下
-运行（`build.sh` 已处理）。
+运行（`build.sh` 已处理）。桌面图标读 `ui/images/`，应用中心读 `ICON*.PNG`；
+**换了图标必须重跑 build.sh 重新打包**，否则 release 里的 fpk 还是旧图。
+另一台设备上应用中心图标不刷新是**前端浏览器缓存**，强刷/无痕即恢复。
 
-### 7.12 git 与隐私（开源）
+### 7.12 安全模型与 0.4.0 加固
+
+先说已经是对的架构（改动时不要破坏）：
+
+- **无路径穿越**：所有书目访问走 `hashID`（sha1 前缀 16 hex）查内存索引，
+  从不拿用户输入拼文件路径；`findBook`/`findSeries` 查不到就 404。
+- **symlink 不跟随**（`scanDir` 跳过 `os.ModeSymlink`，深度上限 8）。
+- **管理 API 只在 Unix socket 侧可达**（0660，fnOS 网关注入 `X-Trim-Isadmin`）；
+  TCP 侧 Basic Auth 用户永远 `Admin=false`。`encoding/xml` 无 XXE 风险。
+- 密码 bcrypt、`users.json` 0600 原子写、登录限速 3 次/分钟/IP。
+
+0.4.0 修复的问题（都有对应单测，见 `cover_test.go`）：
+
+1. **解压炸弹（中危）**：恶意 cbz 里塞一张头声明 8000×6000 的 PNG 能让
+   `image.Decode` 申请上百 MB 内存。现在所有解码走 `decodeLimited`：
+   先 `io.LimitReader` 限编码数据 32 MB，再 `image.DecodeConfig` 预检像素
+   （上限 4000 万 ≈ 7900×5100，比 8K 大），过了才真正 `Decode`。
+   zip entry 的流不可回卷，所以先 `ReadAll` 到内存再重复 `bytes.NewReader`。
+2. **用户名注入（中危）**：管理页用 `escHtml` 转义用户名后拼进
+   `onclick="f('...')"`，但 `&#39;` 在 HTML 属性的 JS 上下文里会被解码回 `'`，
+   含引号的用户名可注入前端脚本。根治是 `validUsername`：仅字母数字与
+   `._-`、≤32 位，`apiAddUser` / `apiImport` / `ensureUsers` 三处入口都校验。
+3. **刮削 ID 穿越（低危）**：`apiScrapeApply/Remove/Ignore` 的 id 会拼进
+   封面文件路径，加 `validScrapeID`（hex 字符集、≤64 位）+ `filepath.Base` 兜底
+   （`opds.go:scrapedCoverJPEG`、`scrape.go:metaStore.remove` 同样处理）。
+4. **导入绕过权限白名单（低危）**：`apiImport` 恢复用户权限时现在过
+   `normalizePermDirs(iu.Dirs, s.grantedDirs())`，备份文件里的越权路径会被清掉。
+
+### 7.13 git 与隐私（开源）
 
 - 仓库：`github.com/Bilibilimoon/keda-shelf`，main 分支直接提交，发版打 tag
   （`v0.3.0` 格式）。`.gitignore` 排除 Go 工具链、构建产物、备份、testdata。
@@ -379,7 +410,33 @@ chmod -R u+rwX,go+rX .
 `build.sh` 里已对产物做 755/644 修正；注意 `chmod -R` 会清掉 `build.sh`
 自身的可执行位，需要单独 `chmod +x build.sh`。
 
-### 8.5 网络
+### 8.5 本机 `install-local` 的 644 竞争 bug
+
+**仅本开发机**（fnOS 1.2.0701，另一台同版本 NAS 正常）：`install-local`
+把 fpk 解包到 `/tmp/appcenter.pack.<ts>` 时根目录 mode 是 644（无 x 位），
+导致 `fork/exec cmd/install_init: permission denied`，报错码 10237
+（APP_INSTALL_FAILED_INSTALL_INIT_EXCEPTION）。真实报错只出现在
+`/var/log/trim_app_center/error.log`，journalctl 里只有 sudo 记录。
+
+绕过：后台跑一个无 sleep 的紧密 chmod 循环赢得竞争（`/tmp/chmodwatch.py`，
+60 秒有效，重启后可能丢失可重建）：
+
+```python
+import glob, os, time
+end = time.time() + 60
+while time.time() < end:
+    for d in glob.glob('/tmp/appcenter.pack.*'):
+        try: os.chmod(d, 0o755)
+        except OSError: pass
+```
+
+配套坑：卸载后 `appcenter` 数据库 `app_package` 表可能残留**孤儿记录**
+（指向已消失的 /tmp 路径），会直接挡住重装，需手工
+`DELETE FROM app_package WHERE app_name='mangagate'`；另外卸载可能残留
+`mangagate` 系统用户/组（userdel/groupdel 清掉再装）。命令链里 groupdel
+对不存在的组报错会 `&&` 短路后续命令，注意别用链式写法。
+
+### 8.6 网络
 
 - `proxy.golang.org` 不通，`goproxy.cn` 可用；`build.sh` 默认
   `GOPROXY=https://goproxy.cn,direct`、`GOSUMDB=off`。
@@ -443,7 +500,7 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 
 | 项 | 值 |
 |---|---|
-| 已安装版本 | 0.3.0（热替换二进制；appcenter 数据库的名称/版本已手工对齐为「可达书柜 0.3.0」） |
+| 已安装版本 | 0.4.0（重装升级；0.3.x 期间用热替换，见下） |
 | 显示名 | 可达书柜（原名「漫画网关」，0.3.0 更名；appname 保持 `mangagate` 不变） |
 | 端口 | 5080 |
 | 漫画库 | 单个授权目录（示例测试库，5 系列 / 5 本） |
@@ -506,9 +563,14 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 1. `pkg/mangagate/manifest` 与 `src/main.go:appVersion` **同时**递增版本号。
 2. 更新 manifest 的 `changelog` 与本文档对应章节。
 3. `./build.sh`。
-4. 本机：`go test` + `smoke_test.py`（单根/双根）全 PASS。
+4. 本机：`go test` + `smoke_test.py`（单根/双根）全 PASS；本机升级验证
+   （注意 §8.5 的 644 竞争绕过）。
 5. 提交 git（先过隐私扫描）并打 tag：`git tag vX.Y.Z && git push --tags`。
-6. 分发新的 `pkg/mangagate/mangagate.fpk`（或让对方从 GitHub release 拿）。
+6. 用 GitHub API 建 Release 并上传 `pkg/mangagate/mangagate.fpk`
+   （SSH key 不能调 API，需要细粒度 PAT，仅给本仓库 Contents 读写权限、
+   短有效期，用完即删）。上传前对 fpk **解包跑一次隐私扫描**——构建产物
+   不走 git，扫描 skill 看不到它。
+7. release 说明列出主要变更；用户从 Releases 页下载 fpk 安装。
 
 ### 不要做
 
