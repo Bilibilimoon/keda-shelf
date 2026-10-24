@@ -1,0 +1,68 @@
+[
+  {
+    "stepTitle": "连接设置",
+    "items": [
+      {
+        "type": "text",
+        "field": "admin_user",
+        "label": "管理员账号",
+        "initValue": "admin",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入管理员账号"
+          },
+          {
+            "pattern": "^[A-Za-z0-9_.-]{2,32}$",
+            "message": "账号仅支持字母、数字、下划线、点和短横线（2-32 位）"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "admin_pass",
+        "label": "管理员密码",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入管理员密码"
+          },
+          {
+            "min": 6,
+            "message": "密码至少 6 位"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "port",
+        "label": "服务端口",
+        "initValue": "5080",
+        "helpText": "App 通过 NAS 的 IP 加这个端口连接，默认 5080",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入服务端口"
+          },
+          {
+            "pattern": "^([1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+            "message": "请输入 1024-65535 之间的端口"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "stepTitle": "安装后怎么用",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "安装完成后，先在「应用设置 → 授权目录」里选择漫画所在的文件夹，保存后服务会自动重启，然后打开应用桌面入口确认漫画库已扫描出来。"
+      },
+      {
+        "type": "tips",
+        "helpText": "在可达阅读器里添加 OPDS 服务器：地址填 http://NAS的局域网IP:5080/opds/v1.2/catalog，用户名和密码填这里设置的管理员账号。该账号用于阅读；管理目录和用户请从飞牛桌面入口进入。"
+      }
+    ]
+  }
+]

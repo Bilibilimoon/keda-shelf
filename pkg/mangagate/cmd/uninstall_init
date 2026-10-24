@@ -1,0 +1,18 @@
+#!/bin/bash
+# Stop a running instance before the package files are removed.
+
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+SOCKET="${TRIM_APPDEST}/mangagate.sock"
+
+if [ -r "${PID_FILE}" ]; then
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}" 2>/dev/null
+        sleep 1
+        kill -KILL "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}"
+fi
+rm -f "${SOCKET}" 2>/dev/null
+
+exit 0

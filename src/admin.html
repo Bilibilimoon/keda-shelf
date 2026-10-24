@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>可达书柜</title>
+<style>
+  :root {
+    --bg: #f5f7fb; --card: #fff; --line: #e3e8f0; --text: #1f2937;
+    --muted: #6b7280; --accent: #2563eb; --ok: #059669; --warn: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 22px; }
+  h1 { font-size: 24px; margin: 0; letter-spacing: .5px; }
+  .ver { color: var(--muted); font-size: 13px; }
+  .who { margin-left: auto; color: var(--muted); font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px; margin-bottom: 18px; box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  }
+  h2 { font-size: 15px; margin: 0 0 14px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .6px; }
+  .url-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .url-label { width: 74px; color: var(--muted); font-size: 13px; }
+  code.url {
+    flex: 1; min-width: 240px; background: #f0f4fa; border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; font-size: 13px; word-break: break-all;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  button, .btn {
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+    border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: #b91c1c; border-color: #fecaca; }
+  button:hover { filter: brightness(.97); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+  .stat { background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .stat b { display: block; font-size: 20px; font-weight: 650; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  .badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+           background: #ecfdf5; color: var(--ok); }
+  .badge.off { background: #fff7ed; color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.actions { text-align: right; white-space: nowrap; }
+  input, select {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+    font-size: 14px; background: #fff; color: var(--text);
+  }
+  .form-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .form-row input[type=text], .form-row input[type=password] { flex: 1; min-width: 150px; }
+  .radio-list label { display: flex; gap: 8px; align-items: center; padding: 7px 0;
+                      font-size: 14px; font-family: ui-monospace, Menlo, monospace; }
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+  .toast {
+    position: fixed; right: 20px; bottom: 20px; background: #111827; color: #fff;
+    padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0;
+    transform: translateY(8px); transition: .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .note { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px;
+          padding: 12px 14px; font-size: 13px; color: #1e3a8a; margin-top: 12px; }
+  .note b { display: block; margin-bottom: 4px; }
+  dialog {
+    border: 1px solid var(--line); border-radius: 12px; padding: 20px;
+    max-width: 460px; width: calc(100% - 40px);
+  }
+  dialog::backdrop { background: rgba(15, 23, 42, .45); }
+  dialog h2 { margin: 0 0 14px; }
+  .perm-list {
+    max-height: 300px; overflow: auto; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; margin-top: 10px;
+  }
+  .perm-list label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  .perm-node { padding: 2px 0; }
+  .perm-node summary { list-style: none; cursor: pointer; }
+  .perm-node summary::-webkit-details-marker { display: none; }
+  .perm-node summary::before {
+    content: "▸"; color: var(--muted); display: inline-block; width: 14px;
+    font-size: 12px; transition: transform .12s;
+  }
+  .perm-node[open] > summary::before { transform: rotate(90deg); }
+  .perm-node > div { padding-left: 22px; }
+  .perm-list input:disabled { opacity: .5; }
+  .scrape-node summary {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    cursor: pointer; list-style: none; padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .scrape-node summary::-webkit-details-marker { display: none; }
+  .scrape-name { font-size: 14px; font-weight: 600; }
+  .scrape-meta { color: var(--muted); font-size: 12px; }
+  .scrape-actions { margin-left: auto; display: flex; gap: 6px; }
+  .scrape-books { padding-left: 14px; }
+  .scrape-book {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 13px;
+  }
+  .scrape-cand {
+    display: flex; gap: 10px; align-items: center; padding: 8px;
+    border: 1px solid var(--line); border-radius: 8px; margin-top: 8px;
+    cursor: pointer;
+  }
+  .scrape-cand:hover { border-color: var(--accent); }
+  .scrape-cand img {
+    width: 40px; height: 56px; object-fit: cover; border-radius: 4px;
+    background: #f0f4fa; flex: none;
+  }
+  .scrape-cand-text { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+  .root-item {
+    font-size: 14px; font-family: ui-monospace, Menlo, monospace;
+    padding: 7px 0; border-bottom: 1px solid var(--line);
+  }
+  .prob-item {
+    font-size: 13px; padding: 7px 0; border-bottom: 1px dashed var(--line);
+    word-break: break-all;
+  }
+  .prob-item span { color: var(--warn); margin-right: 8px; }
+  pre.log {
+    background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px 14px;
+    font-size: 12px; line-height: 1.5; overflow: auto; max-height: 320px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all; margin-top: 12px;
+  }
+  @media (max-width: 620px) { .url-label { width: 100%; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>可达书柜</h1>
+    <span class="ver" id="ver"></span>
+    <span class="who" id="who"></span>
+  </header>
+
+  <div class="card">
+    <h2>连接地址</h2>
+    <div class="url-row">
+      <span class="url-label">OPDS</span>
+      <code class="url" id="opds">—</code>
+      <button onclick="copyText('opds')">复制</button>
+    </div>
+    <p class="hint">在可达阅读器的「OPDS 服务器」里填上面的地址，用户名和密码用下面「用户」里配置的账号。</p>
+    <div class="note">
+      <b>注意</b>
+      局域网内可直接使用上面的地址。公网访问需要你自己的域名解析到这台 NAS，并在路由器上放行服务端口；应用支持在同一端口同时接受 HTTP 与 HTTPS，证书在应用设置的 TLS 证书路径里配置。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>漫画库状态 <span class="badge" id="readyBadge">未就绪</span></h2>
+    <div class="stats">
+      <div class="stat"><b id="sSeries">0</b><span>系列</span></div>
+      <div class="stat"><b id="sBooks">0</b><span>书籍</span></div>
+      <div class="stat"><b id="sPages">0</b><span>页数</span></div>
+      <div class="stat"><b id="sSize">0</b><span>占用空间</span></div>
+    </div>
+    <p class="hint" id="scanTime"></p>
+    <details id="probBox" style="display:none; margin-top:10px">
+      <summary style="cursor:pointer; font-size:14px; color: var(--warn)">扫描异常 <span id="probCount"></span></summary>
+      <div id="probList" style="margin-top:8px"><div class="empty">加载中…</div></div>
+    </details>
+  </div>
+
+  <div class="card" id="dirCard">
+    <h2>漫画目录</h2>
+    <p class="hint" style="margin-top:0">以下授权目录已全部生效，每个目录在书架里是一个独立书库。要新增或移除位置，请到「应用设置 → 授权目录」里修改，保存后自动重启生效。</p>
+    <div class="radio-list" id="roots"><div class="empty">暂无授权目录。请先在应用设置里授权漫画所在目录。</div></div>
+    <div class="form-row">
+      <button class="primary" onclick="rescan()">重新扫描</button>
+    </div>
+  </div>
+
+  <div class="card" id="userCard">
+    <h2>用户</h2>
+    <table id="users"><thead>
+      <tr><th>用户</th><th>可见范围</th><th></th></tr>
+    </thead><tbody></tbody></table>
+    <div class="form-row">
+      <input type="text" id="newUser" placeholder="用户名">
+      <input type="password" id="newPass" placeholder="密码（至少 6 位）">
+      <button class="primary" onclick="addUser()">添加用户</button>
+    </div>
+    <p class="hint">新增账号一律是标准用户，只能通过 OPDS 阅读。点每行的「权限」可以限制该用户只能看到哪些系列。</p>
+  </div>
+
+  <div class="card" id="metaCard" style="display:none">
+    <h2>系列信息 <button style="margin-left:8px" onclick="loadScrape(true)">刷新</button></h2>
+    <p class="hint" style="margin-top:0">为系列或单本书匹配作品条目，补全作者、简介、标签和官方封面。epub 自带元数据时无需刮削；标「无信息」的建议搜一下。</p>
+    <div class="form-row" style="margin-top:0">
+      <button class="primary" id="autoBtn" onclick="autoScrape()">批量尝试</button>
+      <button id="autoStopBtn" style="display:none" onclick="autoScrapeStop()">停止</button>
+      <span class="scrape-meta" id="autoProg"></span>
+    </div>
+    <div id="suggestBox"></div>
+    <div id="scrapeList"><div class="empty">加载中…</div></div>
+    <p class="hint">「批量尝试」自动搜索所有未匹配系列：高度一致的结果直接应用，拿不准的列在上方「待确认建议」里，点一下即可应用。搜索词已自动去掉卷号和汉化组标记。匹配结果保存在本机，不会改动漫画文件。</p>
+  </div>
+
+  <div class="card" id="logCard" style="display:none">
+    <h2>日志与备份</h2>
+    <div class="form-row" style="margin-top:0">
+      <button class="primary" onclick="loadLog()">查看日志</button>
+      <button onclick="loadLog()">刷新</button>
+      <a class="btn" href="api/export" download>导出配置</a>
+      <button onclick="document.getElementById('importFile').click()">导入配置</button>
+      <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="doImport(this)">
+    </div>
+    <pre class="log" id="logBox" style="display:none"></pre>
+    <p class="hint">显示最近 200 行运行日志。导出的配置包含账号信息（密码哈希），请妥善保管；导入可恢复用户、权限和刮削匹配（端口与授权目录归系统管，不导入）。</p>
+  </div>
+
+  <div class="card">
+    <h2>App 端怎么填</h2>
+    <p class="hint" style="margin-top:0">
+      可达阅读器 → 添加服务器 → OPDS：填上面的 OPDS 地址（或只填 <code>http://局域网IP:端口</code>，App 会自动探测）。
+      用户名密码填这里创建的用户。
+    </p>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<dialog id="permDlg">
+  <h2>可见范围：<span id="permUser"></span></h2>
+  <label style="display:flex;gap:8px;align-items:center;font-size:14px">
+    <input type="checkbox" id="permRestrict"> 限制可见范围（仅勾选目录及其子内容可见）
+  </label>
+  <div class="perm-list" id="permTree"></div>
+  <div class="form-row">
+    <button class="primary" onclick="savePerm()">保存</button>
+    <button onclick="document.getElementById('permDlg').close()">取消</button>
+  </div>
+  <p class="hint">勾选一个目录后，它下面现有的和以后新增的漫画都会对该用户可见；只勾子目录则看不到同级其他目录。勾选任意目录会自动开启限制；关闭「限制」并保存则恢复全部可见。</p>
+</dialog>
+
+<dialog id="scrapeDlg">
+  <h2>匹配作品：<span id="scrapeTarget"></span></h2>
+  <div class="form-row" style="margin-top:0">
+    <input type="text" id="scrapeTerm" placeholder="作品名（可修改后回车）" style="flex:1">
+    <button class="primary" onclick="doScrapeSearch()">搜索</button>
+  </div>
+  <div class="perm-list" id="scrapeResults" style="max-height:340px"></div>
+  <div class="form-row">
+    <button onclick="document.getElementById('scrapeDlg').close()">关闭</button>
+  </div>
+  <p class="hint">点击候选条目完成匹配；缩略图来自 Bangumi。</p>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = { roots: [], root: "", isAdmin: false, user: "" };
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "X-Requested-With": "mangagate", ...(opts.headers || {}) },
+    credentials: "same-origin",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("请求失败 " + res.status));
+  return data;
+}
+
+async function loadStatus() {
+  try {
+    renderStatus(await api("api/status"));
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function renderStatus(s) {
+  state = s;
+  $("ver").textContent = "v" + s.version;
+  $("who").textContent = s.user ? ("当前用户：" + s.user + (s.is_admin ? "（NAS 管理员）" : "")) : "";
+  $("opds").textContent = s.opds_url || "未检测到局域网地址";
+  $("sSeries").textContent = s.series;
+  $("sBooks").textContent = s.books;
+  $("sPages").textContent = s.pages;
+  $("sSize").textContent = fmtSize(s.bytes);
+
+  const parts = [];
+  parts.push(s.ready
+    ? "书库：" + (s.roots || []).map((r) => r.split("/").filter(Boolean).pop()).join("、")
+    : "尚未授权漫画目录");
+  if (s.scanning) {
+    const p = s.scan_progress;
+    parts.push(p
+      ? "正在扫描：已处理 " + p.dirs + " 个目录 · " + p.series + " 个系列 · " + p.books + " 本"
+      : "正在扫描…");
+  } else if (s.last_scan) {
+    parts.push("上次扫描：" + s.last_scan.series + " 个系列 / " + s.last_scan.books +
+      " 本书，用时 " + fmtDuration(s.last_scan.duration_ms));
+  } else if (s.ready) {
+    parts.push("扫描于 " + s.scanned_at);
+  }
+  if (s.problems > 0) parts.push("扫描异常 " + s.problems + " 个");
+  if (s.tls) parts.push("HTTPS 已启用");
+  $("scanTime").textContent = parts.join("　");
+
+  const badge = $("readyBadge");
+  if (s.scanning) {
+    badge.textContent = s.scan_progress ? ("扫描中 · " + s.scan_progress.dirs + " 目录") : "正在扫描…";
+    badge.className = "badge off";
+  } else {
+    badge.textContent = s.ready ? "已就绪" : "未就绪";
+    badge.className = "badge" + (s.ready ? "" : " off");
+  }
+  renderRoots(s);
+  $("dirCard").style.display = s.is_admin ? "" : "none";
+  $("userCard").style.display = s.is_admin ? "" : "none";
+  $("metaCard").style.display = s.is_admin ? "" : "none";
+  $("logCard").style.display = s.is_admin ? "" : "none";
+  renderProblems(s);
+  if (s.is_admin) {
+    loadUsers();
+    if (!scrapeLoaded) { scrapeLoaded = true; loadScrape(); }
+  }
+}
+
+async function renderProblems(s) {
+  const box = $("probBox");
+  if (!s.problems || s.problems === 0 || !s.is_admin) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "";
+  $("probCount").textContent = s.problems + " 个";
+  if (box.open) {
+    try {
+      const d = await api("api/scan/problems");
+      $("probList").innerHTML = (d.problems || []).map((p) =>
+        '<div class="prob-item"><span>' + escHtml(p.reason) + "</span>" + escHtml(p.path) + "</div>"
+      ).join("");
+    } catch (e) { /* 下次刷新再试 */ }
+  }
+}
+$("probBox").addEventListener("toggle", () => { if ($("probBox").open) loadStatus(); });
+
+function renderRoots(s) {
+  const box = $("roots");
+  if (!s.roots || s.roots.length === 0) {
+    box.innerHTML = '<div class="empty">暂无授权目录。请先在应用设置里授权漫画所在目录。</div>';
+    return;
+  }
+  box.innerHTML = s.roots.map((r) =>
+    '<div class="root-item">📁 ' + escHtml(r) + "</div>"
+  ).join("");
+}
+
+async function rescan() {
+  try {
+    const d = await api("api/rescan", { method: "POST", body: "{}" });
+    if (!d.started) toast("已有扫描在进行，等待结果…");
+    await waitScanDone();
+  } catch (e) { toast(e.message); }
+}
+
+async function waitScanDone() {
+  for (let i = 0; i < 900; i++) {
+    await new Promise((r) => setTimeout(r, 700));
+    const s = await api("api/status");
+    renderStatus(s);
+    if (!s.scanning) {
+      if (s.last_scan) {
+        toast("扫描完成：" + s.last_scan.series + " 个系列 / " + s.last_scan.books +
+          " 本书，用时 " + fmtDuration(s.last_scan.duration_ms));
+      } else {
+        toast("扫描完成");
+      }
+      return;
+    }
+  }
+}
+
+async function loadUsers() {
+  try {
+    const d = await api("api/users");
+    const body = $("users").querySelector("tbody");
+    if (!d.users.length) {
+      body.innerHTML = '<tr><td colspan="3" class="empty">还没有用户</td></tr>';
+      return;
+    }
+    body.innerHTML = d.users.map((u) => {
+      const scope = u.restricted
+        ? '<td title="' + escAttr((u.dirs || []).join("\n")) + '">仅 ' + (u.dirs || []).length + " 个目录</td>"
+        : "<td>全部</td>";
+      return "<tr><td>" + escHtml(u.name) + "</td>" + scope +
+        '<td class="actions">' +
+        '<button onclick="openPerm(\'' + escAttr(u.name) + '\')">权限</button> ' +
+        '<button onclick="setPass(\'' + escAttr(u.name) + '\')">改密码</button> ' +
+        '<button class="danger" onclick="delUser(\'' + escAttr(u.name) + '\')">删除</button>' +
+        "</td></tr>";
+    }).join("");
+  } catch (e) { /* 普通用户看不到用户列表 */ }
+}
+
+let permName = null;
+
+function permSortKids(node) {
+  return [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name, "zh"));
+}
+
+// permBuildTree folds the series rel-paths into a directory tree. Book
+// counts accumulate on every ancestor of a series, so each node shows how
+// many books granting it would expose.
+function permBuildTree(series) {
+  const root = { name: "", full: "", children: new Map(), books: 0 };
+  for (const s of series || []) {
+    if (!s.rel || s.rel === "/") continue; // top-level loose books cannot be granted
+    const parts = s.rel.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const full = parts.slice(0, i + 1).join("/");
+      if (!node.children.has(parts[i])) {
+        node.children.set(parts[i], { name: parts[i], full, children: new Map(), books: 0 });
+      }
+      node = node.children.get(parts[i]);
+      node.books += s.books;
+    }
+  }
+  return root;
+}
+
+function permRenderNode(node) {
+  const label = '<label><input type="checkbox" data-dir="' + escAttr(node.full) + '">' +
+    escHtml(node.name) + "（" + node.books + " 本）</label>";
+  const kids = permSortKids(node);
+  if (!kids.length) return '<div class="perm-node">' + label + "</div>";
+  return '<details open class="perm-node"><summary>' + label + "</summary><div>" +
+    kids.map(permRenderNode).join("") + "</div></details>";
+}
+
+// Toggling a node sweeps every descendant: checked+locked when the parent is
+// on, cleared and editable again when it goes off.
+function permSweep(box) {
+  const scope = box.closest(".perm-node");
+  if (!scope) return;
+  scope.querySelectorAll("input[data-dir]").forEach((other) => {
+    if (other === box) return;
+    other.checked = box.checked;
+    other.disabled = box.checked;
+  });
+}
+
+function permUpdateIndeterminate() {
+  const parents = [...$("permTree").querySelectorAll("details.perm-node > summary > label > input")];
+  for (let i = parents.length - 1; i >= 0; i--) {
+    const box = parents[i];
+    const kids = [...box.closest("details").querySelectorAll("input")].filter((k) => k !== box);
+    const checked = kids.filter((k) => k.checked).length;
+    box.indeterminate = checked > 0 && checked < kids.length;
+  }
+}
+
+async function openPerm(name) {
+  permName = name;
+  try {
+    const [ud, sd] = await Promise.all([api("api/users"), api("api/series")]);
+    const u = ud.users.find((x) => x.name === name);
+    if (!u) return toast("用户不存在");
+    $("permUser").textContent = name;
+    $("permRestrict").checked = !!u.restricted;
+    const root = permBuildTree(sd.series);
+    const kids = permSortKids(root);
+    $("permTree").innerHTML = kids.length
+      ? kids.map(permRenderNode).join("")
+      : '<div class="empty">暂无可选目录，请先扫描漫画库</div>';
+    const allowed = new Set(u.dirs || []);
+    // Document order puts ancestors first, so each sweep reaches fresh nodes.
+    $("permTree").querySelectorAll("input[data-dir]").forEach((box) => {
+      box.checked = allowed.has(box.dataset.dir);
+      if (box.checked) permSweep(box);
+    });
+    permUpdateIndeterminate();
+    $("permDlg").showModal();
+  } catch (e) { toast(e.message); }
+}
+
+$("permTree").addEventListener("change", (ev) => {
+  const box = ev.target;
+  if (box.tagName !== "INPUT" || !box.dataset.dir) return;
+  // Checking any directory means the user wants the restriction on.
+  if (box.checked) $("permRestrict").checked = true;
+  permSweep(box);
+  permUpdateIndeterminate();
+});
+
+async function savePerm() {
+  if (!permName) return;
+  const dirs = [...$("permTree").querySelectorAll("input[data-dir]")]
+    .filter((b) => b.checked && !b.disabled)
+    .map((b) => b.dataset.dir);
+  // Save as restricted whenever directories are picked, even if the switch
+  // was left off; saving "unrestricted with picks" would silently drop them.
+  const restricted = $("permRestrict").checked || dirs.length > 0;
+  if (restricted && dirs.length === 0) return toast("请至少勾选一个目录，或关闭限制");
+  try {
+    await api("api/users/perm", {
+      method: "POST",
+      body: JSON.stringify({ name: permName, restricted, dirs }),
+    });
+    $("permDlg").close();
+    toast("权限已保存");
+    loadUsers();
+  } catch (e) { toast(e.message); }
+}
+
+async function loadLog() {
+  try {
+    const d = await api("api/log?lines=200");
+    const box = $("logBox");
+    box.style.display = "";
+    box.textContent = d.lines.length ? d.lines.join("\n") : "（暂无日志）";
+  } catch (e) { toast(e.message); }
+}
+
+// --- scraping ---
+
+let scrapeLoaded = false;
+let scrapeTarget = null;
+
+async function loadScrape(force) {
+  try {
+    const d = await api("api/scrape/status");
+    const bySeries = {};
+    for (const b of d.books || []) {
+      (bySeries[b.series_id] = bySeries[b.series_id] || []).push(b);
+    }
+    $("scrapeList").innerHTML = (d.series || []).map((sr) => {
+      const books = bySeries[sr.id] || [];
+      const inner = books.map((b) => {
+        const badge = b.scraped
+          ? "已匹配" + (b.match_title ? "：" + escHtml(b.match_title) : "")
+          : (b.embedded ? "内嵌元数据" : "无信息");
+        return '<div class="scrape-book">' +
+          '<span class="scrape-name">' + escHtml(b.title) + '</span>' +
+          '<span class="scrape-meta">' + badge + '</span>' +
+          '<span class="scrape-actions">' +
+          '<button data-act="search" data-level="book" data-id="' + escAttr(b.id) + '"' +
+          ' data-term="' + escAttr(b.term || b.title) + '" data-label="' + escAttr(b.title) + '">搜索</button>' +
+          (b.scraped
+            ? ' <button class="danger" data-act="remove" data-level="book" data-id="' + escAttr(b.id) + '">清除</button>'
+            : "") +
+          "</span></div>";
+      }).join("");
+      return '<details class="scrape-node"><summary>' +
+        '<span class="scrape-name">' + escHtml(sr.name) + '</span>' +
+        '<span class="scrape-meta">' + escHtml(sr.rel) + " · " + sr.books + " 本 · " +
+        (sr.scraped ? "已匹配：" + escHtml(sr.title) : "未匹配") + "</span>" +
+        '<span class="scrape-actions">' +
+        '<button data-act="search" data-level="series" data-id="' + escAttr(sr.id) + '"' +
+        ' data-term="' + escAttr(sr.term || sr.name) + '" data-label="' + escAttr(sr.name) + '">搜索</button>' +
+        (sr.scraped
+          ? ' <button class="danger" data-act="remove" data-level="series" data-id="' + escAttr(sr.id) + '">清除</button>'
+          : "") +
+        "</span></summary>" +
+        '<div class="scrape-books">' + (inner || '<div class="empty">无书</div>') + "</div></details>";
+    }).join("") || '<div class="empty">暂无系列</div>';
+    renderAuto(d);
+    if (force) toast("已刷新");
+    const a = d.auto || {};
+    if (a.running) setTimeout(() => loadScrape(false), 1500);
+  } catch (e) { toast(e.message); }
+}
+
+function renderAuto(d) {
+  const a = d.auto || {};
+  const sug = d.suggestions || [];
+  if (a.running) {
+    $("autoBtn").style.display = "none";
+    $("autoStopBtn").style.display = "";
+    $("autoProg").textContent = "批量匹配中：" + a.done + " / " + a.total;
+  } else {
+    $("autoBtn").style.display = "";
+    $("autoStopBtn").style.display = "none";
+    $("autoProg").textContent = a.total > 0 ? "上次批量处理了 " + a.done + " / " + a.total + " 个系列" : "";
+  }
+  $("suggestBox").innerHTML = sug.length
+    ? '<div class="scrape-book" style="border-bottom:1px solid var(--line)"><b>待确认建议</b></div>' +
+      sug.map((x) =>
+        '<div class="scrape-book">' +
+        '<span class="scrape-name">' + escHtml(x.series_name) + "</span>" +
+        '<span class="scrape-meta">→ ' + escHtml(x.candidate.title) +
+        (x.candidate.date ? "（" + escHtml(x.candidate.date) + "）" : "") + "</span>" +
+        '<span class="scrape-actions">' +
+        '<button data-act="apply-suggest" data-id="' + escAttr(x.series_id) + '" data-sid="' + x.candidate.id + '">应用</button> ' +
+        '<button class="danger" data-act="ignore-suggest" data-id="' + escAttr(x.series_id) + '">忽略</button>' +
+        "</span></div>").join("")
+    : "";
+}
+
+$("metaCard").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const d = btn.dataset;
+  if (d.act === "search") {
+    openScrape(d.level, d.id, d.term || d.label, d.label);
+  } else if (d.act === "remove") {
+    removeScrape(d.level, d.id);
+  } else if (d.act === "apply-suggest") {
+    applySuggest(d.id, Number(d.sid));
+  } else if (d.act === "ignore-suggest") {
+    ignoreSuggest(d.id);
+  }
+});
+
+async function autoScrape() {
+  try {
+    await api("api/scrape/auto", { method: "POST", body: JSON.stringify({ action: "start" }) });
+    toast("批量匹配已开始");
+    loadScrape(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function autoScrapeStop() {
+  try {
+    await api("api/scrape/auto", { method: "POST", body: JSON.stringify({ action: "stop" }) });
+    toast("将在当前条目后停止");
+    loadScrape(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function applySuggest(seriesID, subjectID) {
+  try {
+    const d = await api("api/scrape/apply", {
+      method: "POST",
+      body: JSON.stringify({ level: "series", id: seriesID, subject_id: subjectID }),
+    });
+    toast("已匹配：" + (d.title || "成功"));
+    loadScrape(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function ignoreSuggest(seriesID) {
+  try {
+    await api("api/scrape/ignore", { method: "POST", body: JSON.stringify({ id: seriesID }) });
+    loadScrape(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function doImport(input) {
+  const f = input.files && input.files[0];
+  input.value = "";
+  if (!f) return;
+  if (!confirm("导入会覆盖同名用户的密码和权限，并恢复刮削匹配，确认继续？")) return;
+  try {
+    const res = await fetch("api/import", {
+      method: "POST",
+      headers: { "X-Requested-With": "mangagate" },
+      credentials: "same-origin",
+      body: f,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("导入失败 " + res.status));
+    toast("导入完成：新增 " + data.users_added + " 个用户，更新 " + data.users_updated + " 个");
+    loadStatus();
+    loadUsers();
+    scrapeLoaded = true;
+    loadScrape(false);
+  } catch (e) { toast(e.message); }
+}
+
+function openScrape(level, id, term, label) {
+  scrapeTarget = { level, id };
+  $("scrapeTarget").textContent = label || "";
+  $("scrapeTerm").value = term || label || "";
+  $("scrapeResults").innerHTML = "";
+  $("scrapeDlg").showModal();
+  $("scrapeTerm").focus();
+  if (term) doScrapeSearch();
+}
+
+async function doScrapeSearch() {
+  const term = $("scrapeTerm").value.trim();
+  if (!term) return;
+  const box = $("scrapeResults");
+  box.innerHTML = '<div class="empty">搜索中…</div>';
+  try {
+    const d = await api("api/scrape/search", {
+      method: "POST",
+      body: JSON.stringify({ term }),
+    });
+    box.innerHTML = (d.candidates || []).map((c) =>
+      '<div class="scrape-cand" data-sid="' + c.id + '">' +
+      (c.image ? '<img src="' + escAttr(c.image) + '" loading="lazy" alt="">' : "") +
+      '<div class="scrape-cand-text"><b>' + escHtml(c.title) + "</b>" +
+      (c.orig && c.orig !== c.title
+        ? '<span class="scrape-meta">' + escHtml(c.orig) + "</span>" : "") +
+      (c.date ? '<span class="scrape-meta">' + escHtml(c.date) + "</span>" : "") +
+      "</div></div>"
+    ).join("") || '<div class="empty">没有找到结果，换个关键词试试</div>';
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + escHtml(e.message) + "</div>";
+  }
+}
+
+$("scrapeResults").addEventListener("click", (ev) => {
+  const cand = ev.target.closest(".scrape-cand");
+  if (cand) applyScrape(Number(cand.dataset.sid));
+});
+
+$("scrapeTerm").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); doScrapeSearch(); }
+});
+
+async function applyScrape(subjectID) {
+  if (!scrapeTarget || !subjectID) return;
+  const box = $("scrapeResults");
+  box.innerHTML = '<div class="empty">正在拉取详情和封面…</div>';
+  try {
+    const d = await api("api/scrape/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        level: scrapeTarget.level,
+        id: scrapeTarget.id,
+        subject_id: subjectID,
+      }),
+    });
+    $("scrapeDlg").close();
+    toast("已匹配：" + (d.title || "成功"));
+    loadScrape();
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + escHtml(e.message) + "</div>";
+  }
+}
+
+async function removeScrape(level, id) {
+  if (!confirm("清除该匹配信息？封面和简介将恢复默认。")) return;
+  try {
+    await api("api/scrape/remove", {
+      method: "POST",
+      body: JSON.stringify({ level, id }),
+    });
+    toast("已清除");
+    loadScrape();
+  } catch (e) { toast(e.message); }
+}
+
+async function addUser() {
+  const name = $("newUser").value.trim();
+  const pass = $("newPass").value;
+  if (!name) return toast("请输入用户名");
+  if (pass.length < 6) return toast("密码至少 6 位");
+  try {
+    await api("api/users/add", {
+      method: "POST",
+      body: JSON.stringify({ name, password: pass }),
+    });
+    $("newUser").value = ""; $("newPass").value = "";
+    toast("已添加");
+    loadUsers();
+  } catch (e) { toast(e.message); }
+}
+
+async function delUser(name) {
+  if (!confirm("删除用户 " + name + "？")) return;
+  try {
+    await api("api/users/delete", { method: "POST", body: JSON.stringify({ name }) });
+    toast("已删除"); loadUsers();
+  } catch (e) { toast(e.message); }
+}
+
+async function setPass(name) {
+  const pass = prompt("输入 " + name + " 的新密码（至少 6 位）");
+  if (!pass) return;
+  if (pass.length < 6) return toast("密码至少 6 位");
+  try {
+    await api("api/users/password", { method: "POST", body: JSON.stringify({ name, password: pass }) });
+    toast("密码已更新");
+  } catch (e) { toast(e.message); }
+}
+
+function copyText(id) {
+  const text = $(id).textContent;
+  navigator.clipboard.writeText(text).then(() => toast("已复制")).catch(() => toast("复制失败"));
+}
+
+function fmtDuration(ms) {
+  if (ms < 1000) return ms + " 毫秒";
+  return (ms / 1000).toFixed(1) + " 秒";
+}
+
+function fmtSize(n) {  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + " " + u[i];
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function escAttr(s) { return escHtml(s); }
+
+loadStatus();
+setInterval(loadStatus, 5000);
+</script>
+</body>
+</html>

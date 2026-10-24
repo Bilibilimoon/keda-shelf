@@ -1,0 +1,20 @@
+# Go 工具链（build.sh 会自动下载）
+tools/go/
+tools/go.tar.gz
+
+# 构建产物（build.sh 生成）
+build/
+pkg/mangagate/mangagate.fpk
+pkg/mangagate/app/server/
+pkg/mangagate/ICON.PNG
+pkg/mangagate/ICON_256.PNG
+pkg/mangagate/app/ui/images/
+
+# 测试数据（tools/gen_sample.go 可随时再生）
+testdata/
+
+# 线上二进制备份与本地环境
+backup-*/
+*.log
+.env
+mg.env

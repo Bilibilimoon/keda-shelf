@@ -1,0 +1,26 @@
+#!/bin/bash
+# Called after the user saves application settings. Restart the service so new
+# authorized directories (TRIM_DATA_ACCESSIBLE_PATHS) and TLS paths take effect.
+# Keep the previous running/stopped state.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_ROOT="$(readlink -f "$DIR/..")"
+# The platform normally provides these, but fall back to the app layout so the
+# restart also works when invoked manually.
+export TRIM_APPDEST="${TRIM_APPDEST:-$APP_ROOT/target}"
+export TRIM_PKGVAR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+export TRIM_PKGETC="${TRIM_PKGETC:-$APP_ROOT/etc}"
+
+# fnOS runs lifecycle scripts as the package user. A manual root invocation
+# would leave root-owned config.json behind, which then breaks the real start.
+if [ "$(id -u)" = "0" ] && command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid=mangagate --regid=mangagate --init-groups -- "$0" "$@"
+fi
+
+was_running=0
+"$DIR/main" status >/dev/null 2>&1 && was_running=1
+
+"$DIR/main" stop
+if [ "${was_running}" = "1" ]; then
+    "$DIR/main" start
+fi
+exit 0

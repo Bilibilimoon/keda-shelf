@@ -1,0 +1,17 @@
+{
+  ".url": {
+    "mangagate.main": {
+      "title": "可达书柜",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/mangagate",
+      "gatewaySocket": "mangagate.sock",
+      "url": "/app/mangagate/",
+      "allUsers": false,
+      "control": {
+        "accessPerm": "readonly"
+      }
+    }
+  }
+}

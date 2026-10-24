@@ -1,0 +1,149 @@
+#!/bin/bash
+# 可达书柜 (mangagate) lifecycle: start | stop | status
+
+LOG_FILE="${TRIM_PKGVAR}/app.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+SOCKET="${TRIM_APPDEST}/mangagate.sock"
+PORT="${port:-${TRIM_SERVICE_PORT:-5080}}"
+
+case "$(uname -m)" in
+    x86_64|amd64) BIN="${TRIM_APPDEST}/server/mangagate-amd64" ;;
+    *)            BIN="${TRIM_APPDEST}/server/mangagate-arm64" ;;
+esac
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
+fail_msg() { echo "$1" > "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true; }
+
+check_process() {
+    local pid="$1"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+read_pid() {
+    if [ -r "${PID_FILE}" ]; then
+        head -n 1 "${PID_FILE}" | tr -d '[:space:]'
+    fi
+}
+
+# find_pid prefers the pid file but falls back to the process name, so a
+# missing pid file cannot leave an orphan running while a second copy starts.
+find_pid() {
+    local pid
+    pid=$(read_pid)
+    if check_process "${pid}"; then
+        echo "${pid}"
+        return 0
+    fi
+    pid=$(pgrep -x "$(basename "${BIN}")" 2>/dev/null | head -n 1)
+    if check_process "${pid}"; then
+        echo "${pid}"
+        return 0
+    fi
+    return 1
+}
+
+health_ok() {
+    local curl_bin
+    curl_bin=$(command -v curl 2>/dev/null || echo /usr/bin/curl)
+    [ -x "${curl_bin}" ] || return 0
+    "${curl_bin}" -fsS --max-time 2 "http://127.0.0.1:${PORT}/healthz" > /dev/null 2>&1
+}
+
+status_app() {
+    local pid
+    pid=$(find_pid)
+    if [ -n "${pid}" ]; then
+        return 0
+    fi
+    rm -f "${PID_FILE}"
+    return 1
+}
+
+start_app() {
+    if status_app; then
+        return 0
+    fi
+    mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGETC}" 2>/dev/null
+    if [ ! -x "${BIN}" ]; then
+        log_msg "missing binary: ${BIN}"
+        fail_msg "程序文件缺失，请重新安装应用。"
+        return 1
+    fi
+    log_msg "starting 可达书柜 on port ${PORT}"
+    "${BIN}" \
+        --config "${TRIM_PKGETC}" \
+        --data "${TRIM_PKGVAR}" \
+        --port "${PORT}" \
+        --socket "${SOCKET}" \
+        --roots "${TRIM_DATA_ACCESSIBLE_PATHS}" \
+        --tls-cert "${tls_cert:-}" \
+        --tls-key "${tls_key:-}" \
+        --scrape-source "${scrape_source:-}" \
+        --scrape-proxy "${scrape_proxy:-}" \
+        >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+    echo "${pid}" > "${PID_FILE}"
+
+    local i
+    for i in $(seq 1 30); do
+        if ! check_process "${pid}"; then
+            log_msg "process exited during startup"
+            fail_msg "服务启动失败，请查看日志：${LOG_FILE}"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+        if health_ok; then
+            log_msg "started, pid ${pid}"
+            return 0
+        fi
+        sleep 0.5
+    done
+    # A large library may still be scanning; a live process counts as started.
+    if check_process "${pid}"; then
+        log_msg "started with health pending, pid ${pid}"
+        return 0
+    fi
+    fail_msg "服务未能启动，请查看日志：${LOG_FILE}"
+    return 1
+}
+
+stop_app() {
+    local pid
+    pid=$(find_pid)
+    if [ -z "${pid}" ]; then
+        rm -f "${PID_FILE}" "${SOCKET}"
+        return 0
+    fi
+    log_msg "stopping pid ${pid}"
+    kill -TERM "${pid}" 2>/dev/null
+    local i
+    for i in $(seq 1 10); do
+        check_process "${pid}" || break
+        sleep 0.5
+    done
+    if check_process "${pid}"; then
+        kill -KILL "${pid}" 2>/dev/null
+    fi
+    rm -f "${PID_FILE}" "${SOCKET}"
+    return 0
+}
+
+case "$1" in
+    start)
+        start_app
+        ;;
+    stop)
+        stop_app
+        ;;
+    status)
+        if status_app; then
+            exit 0
+        else
+            exit 3
+        fi
+        ;;
+    *)
+        fail_msg "未知操作：$1"
+        exit 1
+        ;;
+esac

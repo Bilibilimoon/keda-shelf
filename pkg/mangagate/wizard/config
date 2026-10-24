@@ -1,0 +1,47 @@
+[
+  {
+    "stepTitle": "使用说明",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "漫画目录：在应用设置里使用「授权目录」选择漫画所在文件夹，保存后服务会自动重启并读到新目录；然后打开桌面入口在管理页选择根目录并扫描。"
+      },
+      {
+        "type": "tips",
+        "helpText": "账号管理：新增账号一律是标准用户，只能阅读。添加/删除用户、切换漫画目录只能由飞牛 NAS 管理员从桌面入口操作，普通用户即使知道端口也无法管理。"
+      },
+      {
+        "type": "tips",
+        "helpText": "连接方式：OPDS 地址 http://NAS的IP:端口/opds/v1.2/catalog。公网访问请使用你自己的域名解析到本机并放行端口；需要 HTTPS 时在下面填写证书路径。"
+      },
+      {
+        "type": "text",
+        "field": "tls_cert",
+        "label": "TLS 证书链路径（可选）",
+        "initValue": "",
+        "helpText": "填写 fullchain 证书的绝对路径后，服务会在同一端口同时接受 HTTPS；留空则只用 HTTP。"
+      },
+      {
+        "type": "text",
+        "field": "tls_key",
+        "label": "TLS 私钥路径（可选）",
+        "initValue": "",
+        "helpText": "与上面对应的私钥文件绝对路径，例如 /vol1/@appconf/mangagate/tls/privkey.pem。"
+      },
+      {
+        "type": "text",
+        "field": "scrape_source",
+        "label": "刮削信息源（可选）",
+        "initValue": "anilist",
+        "helpText": "填 anilist（默认，日文/英文元数据，多数网络可达）或 bangumi（中文元数据，需要网络可达或配合下面的代理）。用于管理页「系列信息」补全作品作者、简介和封面。"
+      },
+      {
+        "type": "text",
+        "field": "scrape_proxy",
+        "label": "刮削代理（可选）",
+        "initValue": "",
+        "helpText": "形如 http://192.168.1.2:7890 的代理地址，仅在信息源需要代理时填写。"
+      }
+    ]
+  }
+]
