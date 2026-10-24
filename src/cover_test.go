@@ -79,7 +79,7 @@ func TestDecodeLimitedRejectsHugeDimensions(t *testing.T) {
 }
 
 func TestValidUsername(t *testing.T) {
-	ok := []string{"admin", "user_01", "a", "Moonly-2.x"}
+	ok := []string{"admin", "user_01", "a", "Someone-2.x"}
 	for _, n := range ok {
 		if !validUsername(n) {
 			t.Errorf("%q should be valid", n)

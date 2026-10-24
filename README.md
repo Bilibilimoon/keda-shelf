@@ -1,5 +1,7 @@
 # 可达书柜（mangagate）
 
+![License](https://img.shields.io/badge/license-PolyForm--Noncommercial%201.0.0-blue)
+
 给飞牛 fnOS 用的小型书柜服务端。它把 NAS 上的漫画目录变成书架，让 iOS 上的
 **可达阅读器**（以及任何支持 OPDS 1.2 的客户端）直接连接，省去配置
 SMB 共享的麻烦。
@@ -187,3 +189,8 @@ port=5080
 
 Go 1.23，标准库 + `golang.org/x/crypto/bcrypt`、`golang.org/x/image`。
 全部静态编译，运行身份为专用 `mangagate` 用户。
+
+## 许可
+
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE) 协议：允许个人学习、
+修改和非商业使用；**商业使用需联系作者获得单独授权**。
