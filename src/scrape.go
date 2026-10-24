@@ -138,12 +138,12 @@ func (m *metaStore) remove(level, id string) error {
 	switch level {
 	case "series":
 		if old := m.o.Series[id]; old != nil {
-			_ = os.Remove(filepath.Join(coverDir(m.dataDir), old.Cover))
+			_ = os.Remove(filepath.Join(coverDir(m.dataDir), filepath.Base(old.Cover)))
 		}
 		delete(m.o.Series, id)
 	case "book":
 		if old := m.o.Books[id]; old != nil {
-			_ = os.Remove(filepath.Join(coverDir(m.dataDir), old.Cover))
+			_ = os.Remove(filepath.Join(coverDir(m.dataDir), filepath.Base(old.Cover)))
 		}
 		delete(m.o.Books, id)
 	default:

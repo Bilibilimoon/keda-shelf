@@ -260,6 +260,24 @@ type userReq struct {
 	Admin    bool   `json:"admin"`
 }
 
+// validUsername keeps account names to a plain character set. They end up in
+// inline onclick handlers on the admin page, so allowing quotes or angle
+// brackets there would turn a crafted name into script injection.
+func validUsername(name string) bool {
+	if len(name) == 0 || len(name) > 32 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '-', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) apiAddUser(w http.ResponseWriter, r *http.Request) {
 	var req userReq
 	if !decodeJSON(w, r, &req) {
@@ -268,6 +286,10 @@ func (s *server) apiAddUser(w http.ResponseWriter, r *http.Request) {
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" || len(req.Password) < 6 {
 		writeErr(w, http.StatusBadRequest, "用户名不能为空，密码至少 6 位")
+		return
+	}
+	if !validUsername(req.Name) {
+		writeErr(w, http.StatusBadRequest, "用户名只能包含字母、数字、._- ，最长 32 位")
 		return
 	}
 	if s.users.find(req.Name) != nil {
@@ -465,18 +487,20 @@ func (s *server) apiImport(w http.ResponseWriter, r *http.Request) {
 	}
 	added, updated := 0, 0
 	for _, iu := range payload.Users {
-		if strings.TrimSpace(iu.Name) == "" || iu.Hash == "" {
+		name := strings.TrimSpace(iu.Name)
+		if name == "" || iu.Hash == "" || !validUsername(name) {
 			continue
 		}
-		if ex := s.users.find(iu.Name); ex != nil {
+		if ex := s.users.find(name); ex != nil {
 			ex.Hash = iu.Hash
 			ex.Restricted = iu.Restricted
-			ex.Dirs = iu.Dirs
+			ex.Dirs = normalizePermDirs(iu.Dirs, s.grantedDirs())
 			updated++
 		} else {
 			s.users.Users = append(s.users.Users, User{
-				Name: iu.Name, Hash: iu.Hash,
-				Restricted: iu.Restricted, Dirs: iu.Dirs,
+				Name: name, Hash: iu.Hash,
+				Restricted: iu.Restricted,
+				Dirs:       normalizePermDirs(iu.Dirs, s.grantedDirs()),
 			})
 			added++
 		}
@@ -697,12 +721,28 @@ func (s *server) applySubject(level, id string, subjectID int) (string, error) {
 	return info.Title, nil
 }
 
+// validScrapeID guards the series/book identifiers that get interpolated
+// into cache file names: anything outside the hash character set is rejected.
+func validScrapeID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) apiScrapeApply(w http.ResponseWriter, r *http.Request) {
 	var req scrapeApplyReq
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.SubjectID <= 0 || (req.Level != "series" && req.Level != "book") {
+	if req.SubjectID <= 0 || (req.Level != "series" && req.Level != "book") || !validScrapeID(req.ID) {
 		writeErr(w, http.StatusBadRequest, "无效的匹配请求")
 		return
 	}
@@ -724,6 +764,10 @@ func (s *server) apiScrapeRemove(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if (req.Level != "series" && req.Level != "book") || !validScrapeID(req.ID) {
+		writeErr(w, http.StatusBadRequest, "无效的请求")
+		return
+	}
 	if err := s.meta.remove(req.Level, req.ID); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效的请求")
 		return
@@ -734,6 +778,10 @@ func (s *server) apiScrapeRemove(w http.ResponseWriter, r *http.Request) {
 func (s *server) apiScrapeIgnore(w http.ResponseWriter, r *http.Request) {
 	var req scrapeRemoveReq
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !validScrapeID(req.ID) {
+		writeErr(w, http.StatusBadRequest, "无效的请求")
 		return
 	}
 	if err := s.meta.setIgnored(req.ID); err != nil {

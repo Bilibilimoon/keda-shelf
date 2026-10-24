@@ -3,11 +3,13 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
 	_ "image/gif"
 	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +22,13 @@ import (
 )
 
 const coverMaxSide = 320
+
+// Limits for decoding images out of untrusted archives: a crafted file must
+// not be able to exhaust memory (decompression bomb) via the cover renderer.
+const (
+	decodeMaxBytes  = 32 << 20  // 32 MB of encoded image data
+	decodeMaxPixels = 40_000_000 // larger than 8K; any real comic page fits
+)
 
 // Per-book locks plus a small global pool let several covers render at once
 // without letting image decoding saturate every core.
@@ -84,6 +93,28 @@ func extractCoverImage(b *Book) image.Image {
 	return nil
 }
 
+// decodeLimited decodes one image from r, capping the encoded size and the
+// pixel dimensions first so hostile archives cannot OOM the process. The
+// entry stream of a zip file cannot be rewound, so the bytes are buffered.
+func decodeLimited(r io.Reader) (image.Image, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, decodeMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > decodeMaxBytes {
+		return nil, errors.New("image data exceeds size limit")
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > decodeMaxPixels {
+		return nil, errors.New("image dimensions exceed pixel limit")
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	return img, err
+}
+
 // imageFromZipEntry decodes the image stored under one archive entry name.
 func imageFromZipEntry(file, entry string) image.Image {
 	zr, err := zip.OpenReader(file)
@@ -99,7 +130,7 @@ func imageFromZipEntry(file, entry string) image.Image {
 		if err != nil {
 			return nil
 		}
-		img, _, err := image.Decode(rc)
+		img, err := decodeLimited(rc)
 		rc.Close()
 		if err != nil {
 			return nil
@@ -152,7 +183,7 @@ func firstImageInZip(file string) image.Image {
 		if err != nil {
 			continue
 		}
-		img, _, err := image.Decode(rc)
+		img, err := decodeLimited(rc)
 		rc.Close()
 		if err == nil {
 			return img
@@ -169,10 +200,16 @@ func decodeImageFile(path string) (image.Image, error) {
 	defer f.Close()
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".bmp":
-		return bmp.Decode(f)
+		b, err := io.ReadAll(io.LimitReader(f, decodeMaxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > decodeMaxBytes {
+			return nil, errors.New("image data exceeds size limit")
+		}
+		return bmp.Decode(bytes.NewReader(b))
 	}
-	img, _, err := image.Decode(f)
-	return img, err
+	return decodeLimited(f)
 }
 
 func encodeCover(src image.Image) []byte {

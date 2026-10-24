@@ -307,6 +307,10 @@ func ensureUsers(cfg *Config, store *UserStore, configDir, initUser, initPass st
 	if name == "" || pass == "" {
 		return nil
 	}
+	if !validUsername(name) {
+		log.Printf("admin username %q has invalid characters; refusing to create user", name)
+		return nil
+	}
 	if len(pass) < 6 {
 		log.Printf("admin password is shorter than 6 characters; refusing to create user")
 		return nil

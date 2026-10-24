@@ -554,7 +554,9 @@ func (s *server) scrapedCoverJPEG(b *Book) []byte {
 		if info == nil || info.Cover == "" {
 			continue
 		}
-		if raw, err := os.ReadFile(filepath.Join(coverDir(s.dataDir), info.Cover)); err == nil && len(raw) > 0 {
+		// Covers live flat under covers/; Base keeps a tampered sidecar file
+		// from pointing outside that directory.
+		if raw, err := os.ReadFile(filepath.Join(coverDir(s.dataDir), filepath.Base(info.Cover))); err == nil && len(raw) > 0 {
 			return raw
 		}
 	}
