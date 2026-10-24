@@ -92,6 +92,10 @@
   .perm-node[open] > summary::before { transform: rotate(90deg); }
   .perm-node > div { padding-left: 22px; }
   .perm-list input:disabled { opacity: .5; }
+  .scrape-list {
+    max-height: 360px; overflow: auto; border: 1px solid var(--line);
+    border-radius: 8px; padding: 0 12px; margin-top: 10px;
+  }
   .scrape-node summary {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
     cursor: pointer; list-style: none; padding: 9px 0;
@@ -202,8 +206,8 @@
       <button id="autoStopBtn" style="display:none" onclick="autoScrapeStop()">停止</button>
       <span class="scrape-meta" id="autoProg"></span>
     </div>
-    <div id="suggestBox"></div>
-    <div id="scrapeList"><div class="empty">加载中…</div></div>
+    <div id="suggestBox" class="scrape-list"></div>
+    <div id="scrapeList" class="scrape-list"><div class="empty">加载中…</div></div>
     <p class="hint">「批量尝试」自动搜索所有未匹配系列：高度一致的结果直接应用，拿不准的列在上方「待确认建议」里，点一下即可应用。搜索词已自动去掉卷号和汉化组标记。匹配结果保存在本机，不会改动漫画文件。</p>
   </div>
 
@@ -444,7 +448,7 @@ function permRenderNode(node) {
     escHtml(node.name) + "（" + node.books + " 本）</label>";
   const kids = permSortKids(node);
   if (!kids.length) return '<div class="perm-node">' + label + "</div>";
-  return '<details open class="perm-node"><summary>' + label + "</summary><div>" +
+  return '<details class="perm-node"><summary>' + label + "</summary><div>" +
     kids.map(permRenderNode).join("") + "</div></details>";
 }
 
@@ -490,6 +494,10 @@ async function openPerm(name) {
       if (box.checked) permSweep(box);
     });
     permUpdateIndeterminate();
+    // Tree starts fully collapsed; only branches with existing grants unfold.
+    $("permTree").querySelectorAll("details.perm-node").forEach((d) => {
+      if (d.querySelector("input:checked")) d.open = true;
+    });
     $("permDlg").showModal();
   } catch (e) { toast(e.message); }
 }
@@ -593,6 +601,7 @@ function renderAuto(d) {
     $("autoStopBtn").style.display = "none";
     $("autoProg").textContent = a.total > 0 ? "上次批量处理了 " + a.done + " / " + a.total + " 个系列" : "";
   }
+  $("suggestBox").style.display = sug.length ? "" : "none";
   $("suggestBox").innerHTML = sug.length
     ? '<div class="scrape-book" style="border-bottom:1px solid var(--line)"><b>待确认建议</b></div>' +
       sug.map((x) =>

@@ -18,3 +18,4 @@ backup-*/
 *.log
 .env
 mg.env
+__pycache__/
