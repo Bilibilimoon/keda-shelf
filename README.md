@@ -118,11 +118,21 @@ Node、Python 或 Docker。
 ## 开发与构建
 
 ```bash
+git clone git@github.com:Bilibilimoon/keda-shelf.git
+cd keda-shelf
 ./build.sh
 ```
 
-脚本会把 Go 工具链下载到 `tools/`（不安装到系统），编译两个架构，生成图标，
-再用 `fnpack` 打包。依赖：`curl`、`tar`、`fnpack`。
+脚本会把 Go 工具链下载到 `tools/`（不安装到系统），用 `tools/icon.png`
+生成各尺寸图标（不存在则绘制默认图形），编译两个架构，再用 `fnpack` 打包。
+依赖：`curl`、`tar`、`fnpack`。
+
+测试：
+
+```bash
+cd src && ../tools/go/bin/go test .   # 单元测试（解析/扫描/权限/分页等纯逻辑）
+python3 tools/smoke_test.py --help    # HTTP 冒烟测试（权限/刮削可走本地 mock）
+```
 
 本机验证：
 
@@ -137,6 +147,8 @@ admin_user=admin
 admin_pass=你的密码
 port=5080
 ```
+
+架构决策、fnOS 平台细节、测试方法与发版流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 测试样本可以用：
 
