@@ -18,7 +18,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const appVersion = "0.3.1"
+const appVersion = "0.4.0"
 const appSlug = "mangagate"
 
 func main() {
