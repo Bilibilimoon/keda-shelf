@@ -25,7 +25,7 @@
 ## 2. 快速开始
 
 ```bash
-git clone git@github.com:Bilibilimoon/keda-shelf.git ~/keda-shelf
+git clone https://github.com/Bilibilimoon/keda-shelf.git ~/keda-shelf
 cd ~/keda-shelf
 
 # 构建（会自动下载 Go 到 tools/go，不会装进系统）

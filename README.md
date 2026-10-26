@@ -1,5 +1,6 @@
 # 可达书柜（mangagate）
 
+![Release](https://img.shields.io/github/v/release/Bilibilimoon/keda-shelf)
 ![License](https://img.shields.io/badge/license-PolyForm--Noncommercial%201.0.0-blue)
 
 给飞牛 fnOS 用的小型书柜服务端。它把 NAS 上的漫画目录变成书架，让 iOS 上的
@@ -34,6 +35,15 @@ SMB 共享的麻烦。
 4. 打开飞牛桌面上的「可达书柜」图标，确认管理页里已经扫描出系列和书籍。
 
 > 如果没有手动安装入口，需要在应用中心设置里允许安装第三方应用。
+
+### 升级与卸载
+
+- **升级**：应用中心不会原地覆盖安装，先「卸载」再手动安装新 fpk 即可。
+  卸载会保留配置（用户、权限、刮削匹配）和运行数据（扫描缓存、封面），
+  重装后**只需重新选择一次授权目录**。
+- **卸载**：应用中心直接卸载，你的漫画文件不会被删除。配置和缓存分别保存在
+  `/vol1/@appconf/mangagate/` 与 `/vol1/@appdata/mangagate/`，卸载不删除；
+  确认不再使用后可手动删掉这两个目录。
 
 ## 在可达阅读器里连接
 
@@ -121,7 +131,7 @@ Node、Python 或 Docker。
 ## 开发与构建
 
 ```bash
-git clone git@github.com:Bilibilimoon/keda-shelf.git
+git clone https://github.com/Bilibilimoon/keda-shelf.git
 cd keda-shelf
 ./build.sh
 ```
@@ -185,6 +195,38 @@ port=5080
   ≤ 32 MB、像素总数 ≤ 4000 万，约 7900×5100，比 8K 还大），伪造超大尺寸的
   「解压炸弹」图片会被直接拒绝，不会拖垮服务。
 
+## 常见问题
+
+**应用中心/桌面图标显示的还是旧图标？**
+是浏览器缓存。强制刷新（Ctrl+Shift+R）或开无痕窗口即可，包本身没有问题。
+
+**用 `xxx.fnos.net` 域名 + 5080 端口连不上？**
+飞牛的 fnConnect 域名走中继，只转发飞牛门户端口，第三方应用的端口不可达。
+局域网内直接用 `http://NAS的IP:5080`；公网访问见上文「公网访问」。
+
+**可达阅读器连接失败？**
+依次确认：地址是 `http://NAS的IP:5080/opds/v1.2/catalog`（或只填
+`http://NAS的IP:5080`）；账号是管理页里添加的应用账号（不是 NAS 账号）；
+手机和 NAS 在同一网络；NAS 防火墙没有拦 5080。
+
+**RAR / CBR 没有封面？**
+已知限制：服务端不解压 RAR，用灰色占位图代替，不影响阅读器打开和翻页。
+转成 CBZ 即可拥有封面。
+
+**第一次扫描很慢，重启后又很快？**
+页数统计是首次扫描的大头（要逐个打开压缩包）。结果缓存在运行数据目录，
+之后启动秒开，重新扫描时未变化的压缩包也不再重新数页数。
+
+**设置了可见范围的书看不到？**
+权限按目录路径绑定：目录改名或移动后授权失效，需要重新勾选；漫画库最
+顶层的散图（不属于任何子目录）对受限用户不可见，这是刻意设计。
+
+**忘了某个用户的密码？**
+NAS 管理员从桌面打开管理页 → 用户管理 → 重置密码即可，无需重装。
+
+**端口 5080 被占了？**
+安装/配置向导里换一个端口即可；改端口后阅读器里的地址也要相应更新。
+
 ## 技术栈
 
 Go 1.23，标准库 + `golang.org/x/crypto/bcrypt`、`golang.org/x/image`。
@@ -194,3 +236,9 @@ Go 1.23，标准库 + `golang.org/x/crypto/bcrypt`、`golang.org/x/image`。
 
 本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE) 协议：允许个人学习、
 修改和非商业使用；**商业使用需联系作者获得单独授权**。
+
+## 参与贡献
+
+欢迎提 [issue](https://github.com/Bilibilimoon/keda-shelf/issues) 反馈问题
+和建议，贡献代码请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全漏洞请勿
+公开提交，走 [SECURITY.md](SECURITY.md) 里的私有报告渠道。
