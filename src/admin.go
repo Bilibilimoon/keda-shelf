@@ -34,26 +34,26 @@ func (s *server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResp struct {
-	Version      string              `json:"version"`
-	Ready        bool                `json:"ready"`
-	Roots        []string            `json:"roots"`
-	LibraryName  string              `json:"library_name"`
-	LANIP        string              `json:"lan_ip"`
-	Port         int                 `json:"port"`
-	OPDSUrl      string              `json:"opds_url"`
-	BaseURL      string              `json:"base_url"`
-	Series       int                 `json:"series"`
-	Books        int                 `json:"books"`
-	Pages        int                 `json:"pages"`
-	Bytes        int64               `json:"bytes"`
-	ScannedAt    string              `json:"scanned_at"`
-	Scanning     bool                `json:"scanning"`
-	ScanProgress *scanProgressView   `json:"scan_progress,omitempty"`
-	LastScan     *scanView           `json:"last_scan,omitempty"`
-	Problems     int                 `json:"problems"`
-	TLS          bool                `json:"tls"`
-	User         string              `json:"user"`
-	IsAdmin      bool                `json:"is_admin"`
+	Version      string            `json:"version"`
+	Ready        bool              `json:"ready"`
+	Roots        []string          `json:"roots"`
+	LibraryName  string            `json:"library_name"`
+	LANIP        string            `json:"lan_ip"`
+	Port         int               `json:"port"`
+	OPDSUrl      string            `json:"opds_url"`
+	BaseURL      string            `json:"base_url"`
+	Series       int               `json:"series"`
+	Books        int               `json:"books"`
+	Pages        int               `json:"pages"`
+	Bytes        int64             `json:"bytes"`
+	ScannedAt    string            `json:"scanned_at"`
+	Scanning     bool              `json:"scanning"`
+	ScanProgress *scanProgressView `json:"scan_progress,omitempty"`
+	LastScan     *scanView         `json:"last_scan,omitempty"`
+	Problems     int               `json:"problems"`
+	TLS          bool              `json:"tls"`
+	User         string            `json:"user"`
+	IsAdmin      bool              `json:"is_admin"`
 }
 
 type scanResult struct {
@@ -375,9 +375,25 @@ func (s *server) apiScanProblems(w http.ResponseWriter, r *http.Request) {
 // startScan rebuilds the library from every granted root and swaps it in when
 // finished. Unchanged archives keep their cached page counts. It returns
 // false when a scan is already running.
-func (s *server) startScan() bool {
+func (s *server) startScan() bool { return s.runScan(false) }
+
+// autoScanLoop runs an incremental scan on a timer. It never stacks scans: a
+// manual rescan in progress simply skips that tick.
+func (s *server) autoScanLoop() {
+	t := time.NewTicker(s.scanEvery)
+	defer t.Stop()
+	for range t.C {
+		s.runScan(true)
+	}
+}
+
+// runScan rebuilds the library in the background. With auto=true the new
+// snapshot is only swapped in (and its cache written) when something actually
+// changed, so a periodic scan over an untouched library is invisible to
+// readers and does not rewrite library.json every time.
+func (s *server) runScan(auto bool) bool {
 	s.scanMu.Lock()
-	if s.scanning {
+	if s.scanning || len(s.roots) == 0 {
 		s.scanMu.Unlock()
 		return false
 	}
@@ -392,6 +408,21 @@ func (s *server) startScan() bool {
 		lib := newLibrary(s.roots, s.cfg.LibraryName)
 		lib.scan(prev, prog)
 		dur := time.Since(start)
+
+		if auto {
+			s.scanMu.Lock()
+			unchanged := s.lib.fingerprint() == lib.fingerprint()
+			s.scanMu.Unlock()
+			if unchanged {
+				s.scanMu.Lock()
+				s.scanning = false
+				s.prog = nil
+				s.scanMu.Unlock()
+				log.Printf("automatic scan: no changes (%s)", dur.Round(time.Millisecond))
+				return
+			}
+		}
+
 		_ = osWriteLastScan(s.dataDir, dur)
 		if err := lib.saveCache(libraryCachePath(s.dataDir)); err != nil {
 			log.Printf("save library cache: %v", err)
@@ -420,6 +451,10 @@ func (s *server) startScan() bool {
 		s.lastScan = res
 		s.prog = nil
 		s.scanMu.Unlock()
+		if auto {
+			log.Printf("automatic scan: updated library in %s (%d series, %d books)",
+				dur.Round(time.Millisecond), res.Series, res.Books)
+		}
 	}()
 	return true
 }
@@ -596,8 +631,8 @@ type scrapeBookRow struct {
 }
 
 type suggestView struct {
-	SeriesID   string `json:"series_id"`
-	SeriesName string `json:"series_name"`
+	SeriesID   string          `json:"series_id"`
+	SeriesName string          `json:"series_name"`
 	Candidate  scrapeCandidate `json:"candidate"`
 }
 

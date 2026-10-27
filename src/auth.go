@@ -33,6 +33,8 @@ type server struct {
 	scanning bool
 	prog     *scanProgress
 	lastScan *scanResult
+	// scanEvery is the periodic incremental rescan period; zero disables it.
+	scanEvery time.Duration
 
 	autoMu      sync.Mutex
 	autoRunning bool

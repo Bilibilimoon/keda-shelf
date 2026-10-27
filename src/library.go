@@ -2,7 +2,10 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -56,10 +59,10 @@ type library struct {
 }
 
 type scanStats struct {
-	Series int    `json:"series"`
-	Books  int    `json:"books"`
-	Pages  int    `json:"pages"`
-	Bytes  int64  `json:"bytes"`
+	Series int   `json:"series"`
+	Books  int   `json:"books"`
+	Pages  int   `json:"pages"`
+	Bytes  int64 `json:"bytes"`
 }
 
 const maxScanProblems = 500
@@ -129,7 +132,9 @@ func (l *library) scan(prev map[string]*Book, prog *scanProgress) {
 			relKey := prefix
 			name := l.name
 			if prefix != "" {
-				name = prefix
+				// Rel must keep the original bytes (IDs, permissions and scrape
+				// matches are bound to it); only the shown name is decoded.
+				name = displayName(prefix)
 			} else {
 				relKey = "/"
 			}
@@ -222,6 +227,26 @@ func (l *library) booksByPath() map[string]*Book {
 		out[b.Path] = b
 	}
 	return out
+}
+
+// fingerprint summarizes the current snapshot so an automatic rescan can tell
+// a real change from a no-op and leave the served library (and its cache)
+// untouched in the common case.
+func (l *library) fingerprint() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	h := sha1.New()
+	for _, s := range l.series {
+		fmt.Fprintf(h, "S|%s|%s|%s\n", s.ID, s.Name, s.Rel)
+		for _, b := range s.Books {
+			fmt.Fprintf(h, "B|%s|%s|%s|%d|%d|%d|%v\n",
+				b.ID, b.Title, b.Rel, b.Size, b.Pages, b.ModTime.UnixNano(), b.Meta)
+		}
+	}
+	for _, p := range l.problems {
+		fmt.Fprintf(h, "P|%s|%s\n", p.Rel, p.Reason)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 const (
@@ -358,7 +383,7 @@ func scanDir(abs, rel string, depth int, st *scanState) ([]*Series, []*Book) {
 	var loose []*Book
 
 	if len(archives) > 0 {
-		s := &Series{ID: hashID("series:" + rel), Name: filepath.Base(abs), Rel: rel}
+		s := &Series{ID: hashID("series:" + rel), Name: displayName(filepath.Base(abs)), Rel: rel}
 		var books []*Book
 		for _, a := range archives {
 			books = append(books, makeBook(abs, path.Join(rel, a.Name()), a.Name(), archiveFormat(a.Name()), st))
@@ -385,7 +410,7 @@ func scanDir(abs, rel string, depth int, st *scanState) ([]*Series, []*Book) {
 		}
 		loose = append(loose, &Book{
 			ID:      hashID("book:" + rel),
-			Title:   filepath.Base(abs),
+			Title:   displayName(filepath.Base(abs)),
 			Rel:     rel,
 			Path:    abs,
 			Format:  "dir",
@@ -401,7 +426,7 @@ func scanDir(abs, rel string, depth int, st *scanState) ([]*Series, []*Book) {
 		cs, cl := scanDir(filepath.Join(abs, d.Name()), childRel, depth+1, st)
 		out = append(out, cs...)
 		if len(cl) > 0 {
-			s := &Series{ID: hashID("series:" + childRel), Name: d.Name(), Rel: childRel}
+			s := &Series{ID: hashID("series:" + childRel), Name: displayName(d.Name()), Rel: childRel}
 			for _, b := range cl {
 				b.SeriesID = s.ID
 				s.Books = append(s.Books, b)
@@ -419,7 +444,7 @@ func makeBook(dir, rel, name, format string, st *scanState) *Book {
 	full := filepath.Join(dir, name)
 	b := &Book{
 		ID:      hashID("book:" + rel),
-		Title:   strings.TrimSuffix(name, filepath.Ext(name)),
+		Title:   displayName(strings.TrimSuffix(name, filepath.Ext(name))),
 		Rel:     rel,
 		Path:    full,
 		Format:  format,
@@ -471,7 +496,7 @@ func countZipPages(file string) (int, error) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		name := f.Name
+		name := zipEntryName(f)
 		if strings.HasPrefix(name, "__MACOSX/") || strings.HasPrefix(filepath.Base(name), ".") {
 			continue
 		}

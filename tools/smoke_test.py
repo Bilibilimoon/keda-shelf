@@ -222,6 +222,35 @@ def main():
     entries = root.findall("a:entry", NS)
     check("catalog has entries", len(entries) > 0, f"entries={len(entries)}")
 
+    # OPDS search: OpenSearch description, a query that matches a real series
+    # (title and series name fields), and queries that must return nothing.
+    s, _, b = c.req("/opds/v1.2/opensearch.xml")
+    check("opensearch description", s == 200 and b"OpenSearchDescription" in b,
+          f"status={s}")
+
+    first_title = ""
+    for e in entries:
+        title = e.findtext("a:title", default="", namespaces=NS)
+        if title and title not in ("全部系列", "最近添加"):
+            first_title = title
+            break
+    if first_title:
+        s, _, b = c.req("/opds/v1.2/search?q=" + urllib.parse.quote(first_title))
+        hits = len(ET.fromstring(b).findall("a:entry", NS)) if s == 200 else 0
+        check("search finds a real series", s == 200 and hits > 0,
+              f"status={s} hits={hits} q={first_title}")
+
+    s, _, b = c.req("/opds/v1.2/search?q=" +
+                    urllib.parse.quote("no-such-title-zzz-中文"))
+    hits = len(ET.fromstring(b).findall("a:entry", NS)) if s == 200 else -1
+    check("search has no false positives", s == 200 and hits == 0,
+          f"status={s} hits={hits}")
+
+    s, _, b = c.req("/opds/v1.2/search?q=")
+    hits = len(ET.fromstring(b).findall("a:entry", NS)) if s == 200 else -1
+    check("empty search returns nothing", s == 200 and hits == 0,
+          f"status={s} hits={hits}")
+
     subs = [l.get("href") for e in entries for l in e.findall("a:link", NS)
             if l.get("rel") == "subsection"]
     series_paths = [u.replace(c.base, "") for u in subs if "/series/" in u]

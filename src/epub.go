@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"encoding/xml"
 	"html"
 	"io"
 	"net/url"
@@ -88,7 +87,7 @@ func epubMetadata(file string) *bookMeta {
 		return nil
 	}
 	var pkg opfPackage
-	if err := xml.Unmarshal(raw, &pkg); err != nil {
+	if err := xmlDecode(raw, &pkg); err != nil {
 		return nil
 	}
 
@@ -125,7 +124,7 @@ func epubOPFPath(entries map[string]*zip.File) string {
 				FullPath string `xml:"full-path,attr"`
 			} `xml:"rootfiles>rootfile"`
 		}
-		if xml.Unmarshal(raw, &c) == nil && len(c.Rootfiles) > 0 && c.Rootfiles[0].FullPath != "" {
+		if xmlDecode(raw, &c) == nil && len(c.Rootfiles) > 0 && c.Rootfiles[0].FullPath != "" {
 			if entries[c.Rootfiles[0].FullPath] != nil {
 				return c.Rootfiles[0].FullPath
 			}
@@ -222,7 +221,7 @@ func comicInfoMetadata(file string) *bookMeta {
 		Genre   string `xml:"Genre"`
 		Tags    string `xml:"Tags"`
 	}
-	if err := xml.Unmarshal(raw, &ci); err != nil {
+	if err := xmlDecode(raw, &ci); err != nil {
 		return nil
 	}
 	m := &bookMeta{

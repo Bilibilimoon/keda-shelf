@@ -48,13 +48,13 @@ type opdsContent struct {
 }
 
 type opdsEntry struct {
-	Title      string          `xml:"title"`
-	ID         string          `xml:"id"`
-	Updated    string          `xml:"updated"`
-	Authors    []opdsAuthor    `xml:"author,omitempty"`
-	Content    opdsContent     `xml:"content"`
-	Categories []opdsCategory  `xml:"category,omitempty"`
-	Links      []opdsLink      `xml:"link"`
+	Title      string         `xml:"title"`
+	ID         string         `xml:"id"`
+	Updated    string         `xml:"updated"`
+	Authors    []opdsAuthor   `xml:"author,omitempty"`
+	Content    opdsContent    `xml:"content"`
+	Categories []opdsCategory `xml:"category,omitempty"`
+	Links      []opdsLink     `xml:"link"`
 }
 
 type opdsCategory struct {
@@ -637,19 +637,18 @@ func (s *server) serveSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	f := s.newFeed(r, "search", "搜索："+q, kindAcq)
 	f.Updated = at.UTC().Format(time.RFC3339)
-	if q == "" {
+	terms := searchTerms(q)
+	if len(terms) == 0 {
 		writeXML(w, f, kindAcq)
 		return
 	}
-	needle := strings.ToLower(q)
 	var entries []opdsEntry
 	for _, sr := range series {
 		if !perm.ok(sr.Rel) {
 			continue
 		}
-		matchSeries := strings.Contains(strings.ToLower(sr.Name), needle)
 		for _, b := range sr.Books {
-			if matchSeries || strings.Contains(strings.ToLower(b.Title), needle) {
+			if matchesAllTerms(s.bookSearchWithScrape(sr, b), terms) {
 				entries = append(entries, s.bookEntry(r, b))
 			}
 		}

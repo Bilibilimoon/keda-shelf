@@ -6,8 +6,8 @@ import (
 	"errors"
 	"image"
 	"image/color"
-	"image/jpeg"
 	_ "image/gif"
+	"image/jpeg"
 	_ "image/png"
 	"io"
 	"os"
@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/nwaples/rardecode/v2"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
@@ -23,10 +24,15 @@ import (
 
 const coverMaxSide = 320
 
+// maxRarEntries bounds how far a cover lookup walks a RAR archive, so a
+// pathological archive with thousands of non-image entries cannot stall the
+// renderer.
+const maxRarEntries = 2000
+
 // Limits for decoding images out of untrusted archives: a crafted file must
 // not be able to exhaust memory (decompression bomb) via the cover renderer.
 const (
-	decodeMaxBytes  = 32 << 20  // 32 MB of encoded image data
+	decodeMaxBytes  = 32 << 20   // 32 MB of encoded image data
 	decodeMaxPixels = 40_000_000 // larger than 8K; any real comic page fits
 )
 
@@ -45,6 +51,11 @@ func coverJPEG(b *Book, dataDir string) []byte {
 		return placeholderJPEG(b.Title)
 	}
 	key := b.ID
+	if b.Format == "cbr" || b.Format == "rar" {
+		// RAR covers used to be placeholder-only; a suffix invalidates those
+		// cached placeholders once without touching every other cover.
+		key += "-rar1"
+	}
 	if b.Meta != nil && b.Meta.CoverEntry != "" {
 		// Declared covers get their own cache slot so upgrading from a
 		// first-image cover to the declared one invalidates the old cache.
@@ -89,6 +100,9 @@ func extractCoverImage(b *Book) image.Image {
 	}
 	if b.Format == "cbz" || b.Format == "zip" || b.Format == "cb7" || b.Format == "epub" {
 		return firstImageInZip(b.Path)
+	}
+	if b.Format == "cbr" || b.Format == "rar" {
+		return firstImageInRar(b.Path)
 	}
 	return nil
 }
@@ -172,12 +186,15 @@ func firstImageInZip(file string) image.Image {
 		if f.FileInfo().IsDir() || strings.HasPrefix(f.Name, "__MACOSX/") {
 			continue
 		}
-		if strings.HasPrefix(filepath.Base(f.Name), ".") || !isImageName(f.Name) {
+		name := zipEntryName(f)
+		if strings.HasPrefix(filepath.Base(name), ".") || !isImageName(name) {
 			continue
 		}
 		files = append(files, f)
 	}
-	sort.Slice(files, func(i, j int) bool { return naturalLess(files[i].Name, files[j].Name) })
+	sort.Slice(files, func(i, j int) bool {
+		return naturalLess(zipEntryName(files[i]), zipEntryName(files[j]))
+	})
 	for _, f := range files {
 		rc, err := f.Open()
 		if err != nil {
@@ -188,6 +205,36 @@ func firstImageInZip(file string) image.Image {
 		if err == nil {
 			return img
 		}
+	}
+	return nil
+}
+
+// firstImageInRar decodes the first image entry of a RAR/CBR archive. rardecode
+// is pure Go, so RAR covers no longer need the placeholder. Solid archives are
+// read sequentially, which is why the archive itself is the entry reader.
+func firstImageInRar(file string) image.Image {
+	rc, err := rardecode.OpenReader(file)
+	if err != nil {
+		return nil
+	}
+	defer rc.Close()
+	for n := 0; n < maxRarEntries; n++ {
+		h, err := rc.Next()
+		if err != nil {
+			return nil
+		}
+		if h.IsDir || h.Encrypted || h.LinkType != rardecode.LinkTypeNone {
+			continue
+		}
+		name := displayName(h.Name)
+		if !isImageName(name) || strings.HasPrefix(filepath.Base(name), ".") {
+			continue
+		}
+		img, err := decodeLimited(rc)
+		if err != nil {
+			return nil
+		}
+		return img
 	}
 	return nil
 }

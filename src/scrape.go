@@ -350,11 +350,11 @@ func readSnippet(r io.Reader) string {
 func (sc *bangumiScraper) Search(keyword string) ([]scrapeCandidate, error) {
 	var resp struct {
 		Data []struct {
-			ID      int    `json:"id"`
-			Name    string `json:"name"`
-			NameCN  string `json:"name_cn"`
-			Date    string `json:"date"`
-			Images  struct {
+			ID     int    `json:"id"`
+			Name   string `json:"name"`
+			NameCN string `json:"name_cn"`
+			Date   string `json:"date"`
+			Images struct {
 				Large  string `json:"large"`
 				Common string `json:"common"`
 				Medium string `json:"medium"`
@@ -535,9 +535,9 @@ func (a *anilistScraper) Search(keyword string) ([]scrapeCandidate, error) {
 	var resp struct {
 		Page struct {
 			Media []struct {
-				ID         int      `json:"id"`
-				Title      aliTitle `json:"title"`
-				StartDate  struct {
+				ID        int      `json:"id"`
+				Title     aliTitle `json:"title"`
+				StartDate struct {
 					Year int `json:"year"`
 				} `json:"startDate"`
 				CoverImage struct {

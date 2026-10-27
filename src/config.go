@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const defaultPort = 5080
@@ -17,6 +18,23 @@ type Config struct {
 	Port        int      `json:"port"`
 	AdminUser   string   `json:"admin_user"`
 	LibraryName string   `json:"library_name"`
+	// AutoScanMinutes is the periodic incremental rescan interval. nil means
+	// the default of 10 minutes; 0 disables automatic scanning.
+	AutoScanMinutes *int `json:"auto_scan_minutes,omitempty"`
+}
+
+// autoScanInterval resolves the configured period. Automatic scans are
+// incremental in effect: unchanged archives keep their cached page counts and
+// a scan that finds no changes never replaces the served snapshot.
+func autoScanInterval(cfg *Config) time.Duration {
+	const def = 10 * time.Minute
+	if cfg.AutoScanMinutes == nil {
+		return def
+	}
+	if *cfg.AutoScanMinutes <= 0 {
+		return 0
+	}
+	return time.Duration(*cfg.AutoScanMinutes) * time.Minute
 }
 
 func configPath(configDir string) string { return filepath.Join(configDir, "config.json") }
@@ -58,7 +76,8 @@ func saveConfig(configDir string, cfg *Config) error {
 
 // resolveRoots returns the directories currently granted by fnOS. Older saved
 // roots are intentionally ignored: revoking a directory must take effect.
-func resolveRoots(cfg *Config, envPaths string) []string {	set := map[string]bool{}
+func resolveRoots(cfg *Config, envPaths string) []string {
+	set := map[string]bool{}
 	var out []string
 	add := func(p string) {
 		p = strings.TrimSpace(p)

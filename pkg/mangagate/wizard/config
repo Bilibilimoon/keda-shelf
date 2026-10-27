@@ -30,6 +30,13 @@
       },
       {
         "type": "text",
+        "field": "auto_scan_minutes",
+        "label": "自动扫描间隔（分钟，0 关闭）",
+        "initValue": "10",
+        "helpText": "服务会每隔这么多分钟在后台做一次增量扫描：新加的漫画自动出现在书架里，未变化的压缩包不会重复统计页数，库没有任何变化时也不会打扰正在使用的阅读器。填 0 关闭自动扫描（仍可在管理页手动扫描）。"
+      },
+      {
+        "type": "text",
         "field": "scrape_source",
         "label": "刮削信息源（可选）",
         "initValue": "anilist",

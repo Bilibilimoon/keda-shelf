@@ -18,24 +18,25 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const appVersion = "0.4.0"
+const appVersion = "0.5.0"
 const appSlug = "mangagate"
 
 func main() {
 	var (
-		configDir = flag.String("config", envOr("TRIM_PKGETC", "./config"), "configuration directory")
-		dataDir   = flag.String("data", envOr("TRIM_PKGVAR", "./data"), "runtime data directory")
-		portFlag  = flag.Int("port", 0, "listen port")
-		socket    = flag.String("socket", "", "unix socket path for the fnOS gateway")
-		rootsEnv  = flag.String("roots", os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"), "colon separated granted directories")
-		initUser  = flag.String("init-user", "", "create or update this admin user")
-		initPass  = flag.String("init-pass", "", "password for --init-user")
+		configDir  = flag.String("config", envOr("TRIM_PKGETC", "./config"), "configuration directory")
+		dataDir    = flag.String("data", envOr("TRIM_PKGVAR", "./data"), "runtime data directory")
+		portFlag   = flag.Int("port", 0, "listen port")
+		socket     = flag.String("socket", "", "unix socket path for the fnOS gateway")
+		rootsEnv   = flag.String("roots", os.Getenv("TRIM_DATA_ACCESSIBLE_PATHS"), "colon separated granted directories")
+		initUser   = flag.String("init-user", "", "create or update this admin user")
+		initPass   = flag.String("init-pass", "", "password for --init-user")
 		scanOnly   = flag.Bool("scan", false, "scan the library, print stats and exit")
 		tlsCert    = flag.String("tls-cert", envOr("tls_cert", ""), "TLS certificate chain (enables HTTPS on the same port)")
 		tlsKey     = flag.String("tls-key", envOr("tls_key", ""), "TLS private key")
 		scrapeSrc  = flag.String("scrape-source", envOr("scrape_source", "anilist"), "metadata source: anilist | bangumi")
 		scrapeBase = flag.String("scrape-base", envOr("scrape_base", ""), "metadata source base URL override")
 		scrapePx   = flag.String("scrape-proxy", envOr("scrape_proxy", ""), "HTTP(S) proxy for scraping, e.g. http://192.168.1.2:7890")
+		autoScan   = flag.String("auto-scan", envOr("auto_scan_minutes", ""), "automatic incremental rescan interval in minutes (0 disables)")
 	)
 	flag.Parse()
 
@@ -77,6 +78,13 @@ func main() {
 		}
 	}
 	cfg.Roots = roots
+	if v := strings.TrimSpace(*autoScan); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.AutoScanMinutes = &n
+		} else {
+			log.Printf("ignoring invalid auto-scan interval %q", v)
+		}
+	}
 	if err := saveConfig(*configDir, cfg); err != nil {
 		log.Printf("save config: %v", err)
 	}
@@ -126,6 +134,7 @@ func main() {
 		tlsOn:     tlsCfg != nil,
 		meta:      loadMetaStore(filepath.Join(*dataDir, "series-meta.json"), *dataDir),
 		scrape:    newScraper(*scrapeSrc, *scrapeBase, *scrapePx),
+		scanEvery: autoScanInterval(cfg),
 	}
 
 	if *scanOnly {
@@ -136,6 +145,10 @@ func main() {
 	// in the background; unchanged archives skip the page recount.
 	if libFromCache {
 		s.startScan()
+	}
+	if s.scanEvery > 0 {
+		log.Printf("automatic incremental scan every %s", s.scanEvery)
+		go s.autoScanLoop()
 	}
 
 	handler := s.routes()

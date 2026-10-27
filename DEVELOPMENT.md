@@ -1,6 +1,6 @@
 # 可达书柜（mangagate）开发记录（面向后续维护者 / AI）
 
-最后更新：2026-10-23，对应版本 **0.4.0**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
+最后更新：2026-10-27，对应版本 **0.5.0**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
 当前发布渠道：GitHub Releases（每个 tag 挂 `mangagate.fpk`）。
 
 这份文档记录「为什么这么做」和「踩过哪些坑」，README.md 只讲用户怎么装怎么用。
@@ -95,9 +95,11 @@ python3 tools/smoke_test.py --base http://127.0.0.1:5080 \
 | `epub.go` | epub OPF / cbz ComicInfo.xml 内嵌元数据提取、封面声明解析（含 URL 转义） | `archiveMetadata`, `epubMetadata`, `comicInfoMetadata`, `opfCoverPath`, `plainText` |
 | `scrape.go` | 刮削：AniList/Bangumi 双源客户端、搜索词清洗、置信度判断、元数据覆盖层（含建议/忽略） | `newScraper`, `Search`, `Subject`, `cleanSearchTerm`, `scrapeConfident`, `metaStore.*`, `dirPerm` 在 opds.go |
 | `opds.go` | OPDS 1.2 feed（根/书库/系列/最近添加/搜索，全部分页）、目录权限过滤、下载、封面路由、dc 元数据 | `handleOPDS`, `serveRootFeed`, `serveLibraryFeed`, `serveRecent`, `pageEntries`, `reqPerm`, `bookEntry`, `serveBookFile` |
-| `cover.go` | 封面链（刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、320px JPEG 缓存、受控解码（`decodeLimited`） | `coverJPEG`, `scrapedCoverJPEG`(opds.go), `extractCoverImage`, `imageFromZipEntry`, `decodeLimited`, `encodeCover` |
+| `cover.go` | 封面链（刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、320px JPEG 缓存、受控解码（`decodeLimited`）、zip 与 RAR/CBR 首图 | `coverJPEG`, `scrapedCoverJPEG`(opds.go), `extractCoverImage`, `imageFromZipEntry`, `firstImageInZip`, `firstImageInRar`, `decodeLimited`, `encodeCover` |
+| `encoding.go` | 中文编码兼容：GBK/GB18030 显示名转换（zip 条目、本地文件名）、GBK 内嵌元数据解码 | `displayName`, `zipEntryName`, `xmlDecode` |
+| `search.go` | OPDS 搜索：多关键词 AND、可搜索文本（书名/系列/目录/内嵌与刮削元数据） | `searchTerms`, `bookSearchText`, `bookSearchWithScrape`, `matchesAllTerms` |
 | `tls.go` | 同端口 HTTP/HTTPS 协议识别、证书加载 | `loadTLSConfig`, `sniffListener` |
-| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、日志、导入导出、输入校验（`validUsername` / `validScrapeID`） | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `runAutoScrape`, `applySubject`, `startScan`, `apiImport`, `apiExport`, `validUsername`, `validScrapeID` |
+| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、日志、导入导出、输入校验（`validUsername` / `validScrapeID`）、手动与自动扫描共用的 `runScan` | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `runAutoScrape`, `applySubject`, `startScan`, `runScan`, `autoScanLoop`, `apiImport`, `apiExport`, `validUsername`, `validScrapeID` |
 | `admin.html` | 管理页前端（内嵌 `go:embed`，相对路径请求） | — |
 | `util.go` | MIME、ID、LAN IP 探测、日志尾部读取 | `hashID`, `detectLANIP`, `readLogTail` |
 | `*_test.go` | 单元测试（清洗/置信度/归并/epub 解析/扫描器/多根前缀/异常/缓存回路/分页/受控解码/输入校验） | `go test .` |
@@ -145,6 +147,16 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
     一个 `/opds/v1.2/lib/{书库名}` 入口，权限树第一层即书库。
 11. 扫描结果持久化到 `${TRIM_PKGVAR}/library.json`（v2 存 `roots` 数组；能读
     v1 单根旧缓存）。启动时缓存命中且根一致 → 立即服务 + 后台重扫；不一致 → 全量扫。
+12. **显示名编码**：`Rel`/`ID` 始终用文件系统原始字节（权限和刮削都绑路径）；
+    只有 `Series.Name` / `Book.Title` 经 `displayName` 转换——非 UTF-8 的
+    GBK 字节转成中文，合法 UTF-8 原样。zip 条目名按 `NonUTF8` 标志同样处理
+    （仅影响显示与自然排序，打开文件仍用原始条目名）。
+13. **自动增量扫描**（0.5.0）：`runScan(auto=true)` 每 `auto_scan_minutes`
+    （默认 10，0 关闭）跑一次。增量体现在两处：`prevBook` 让未变化的压缩包
+    沿用页数/元数据；扫描完用 `library.fingerprint()` 对比快照，完全相同就
+    丢弃新结果、不替换服务中的库、不写缓存（日志一行 "no changes"）。
+    指纹含书 ID/标题/路径/大小/页数/mtime/元数据与扫描异常，扫描时间本身
+    不参与，避免无意义的 feed `updated` 抖动。
 
 ## 6. 协议契约
 
@@ -163,8 +175,8 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
 | `/opds/v1.2/books/{id}` | 单书 feed |
 | `/opds/v1.2/books/{id}/file` | 下载；压缩包走 `http.ServeContent`（支持 Range），`dir` 动态打 zip |
 | `/opds/v1.2/books/{id}/thumbnail` | 封面 JPEG（刮削 > 声明 > 首图 > 占位） |
-| `/opds/v1.2/search?q=` | 标题/系列名子串搜索（分页） |
-| `/opds/v1.2/opensearch.xml` | OpenSearch 描述 |
+| `/opds/v1.2/search?q=` | 书名/系列名/目录/作者/标签/简介子串搜索（空格分词，全部命中；分页）。刮削补全的标题、作者、标签也参与匹配 |
+| `/opds/v1.2/opensearch.xml` | OpenSearch 描述；描述风格书架的搜索入口 |
 | `/api/status` | 登录即可读；含扫描进度 `scan_progress`、异常数 `problems` |
 | `/api/users`、`/api/users/{add,delete,password,perm}` | 仅 NAS 管理员；`perm` 为目录树权限 |
 | `/api/series`、`/api/rescan`、`/api/scan/problems` | 仅 NAS 管理员 |
@@ -344,7 +356,51 @@ ICON.PNG / ICON_256.PNG / ui/images/icon_{64,256}.png 四个尺寸，否则绘�
 4. **导入绕过权限白名单（低危）**：`apiImport` 恢复用户权限时现在过
    `normalizePermDirs(iu.Dirs, s.grantedDirs())`，备份文件里的越权路径会被清掉。
 
-### 7.13 git 与隐私（开源）
+### 7.13 自动增量扫描（0.5.0）
+
+用户不想每次手动点「重新扫描」。设计取舍：
+
+- **定时轮询而不是 fsnotify**：inotify watch 在几万目录的漫画库上会撞
+  `max_user_watches`，还要自己维护递归 watch；定时全量 walk 的主要成本
+  只是 `os.ReadDir` + `stat`（未变化压缩包的页数走缓存，不打开 zip），
+  小库 0–2ms、十万文件也在秒级。默认 10 分钟，可配 0 关闭。
+- **无变化不替换**：新扫描结果与当前快照做 `fingerprint()` 比较（排序后的
+  ID/标题/路径/大小/页数/mtime/元数据/异常），相同就丢弃，不写
+  `library.json`。否则每 10 分钟一次原子替换会让所有 OPDS feed 的
+  `updated` 变化、客户端缓存失效。
+- 与手动扫描共用 `runScan` + `scanning` 标志，天然不会叠跑。
+- 手动扫描永远替换并写缓存（用户点按钮时期望立即生效，哪怕结果相同）。
+
+### 7.14 RAR/CBR 封面（0.5.0）
+
+引入 `github.com/nwaples/rardecode/v2`（纯 Go，支持 RAR4/RAR5，含 solid
+压缩包），约束得以保持：**不新增 CGO 和外部 `unrar` 依赖**。
+
+- 封面取第一个图片条目（自然顺序不保证，取归档顺序第一个可解码图片）。
+- 顺序 `Next()` 读取是 solid 归档唯一可行方式；遇到加密/链接/目录条目跳过。
+- 条目上限 2000，解码复用 `decodeLimited`（32 MB / 4000 万像素双重上限），
+  恶意 RAR 不能拖垮进程。
+- 页数**不统计**：逐页解压会让扫描变慢一个数量级，保持 `Pages=0`。
+- 封面缓存 key 加 `-rar1` 后缀：升级前 RAR 只有占位图缓存，后缀让它们
+  失效一次，其余格式的封面缓存不受影响。
+
+### 7.15 中文 / GBK 兼容（0.5.0）
+
+国内 Windows 工具产出的 zip 常在未设 UTF-8 标志（`0x800`）时写 GBK 字节；
+Linux 把文件名当不透明字节保存，直接显示就是乱码。处理原则：
+
+- **只在显示层转换**。`Path`/`Rel`/`ID` 必须保持原始字节：权限、刮削匹配、
+  扫描缓存、`os.Open` 全部依赖它。`displayName()` 只在字符串不是合法
+  UTF-8 时尝试 GBK → GB18030，失败原样返回。
+- zip 条目名用 `FileHeader.NonUTF8` 判断；`NonUTF8=true` 也可能是 CP437，
+  GBK 解码失败就保留原文（仅影响显示与排序）。
+- 内嵌元数据（`ComicInfo.xml`、epub 的 OPF/container.xml）经 `xmlDecode`：
+  先按 UTF-8 解析，失败则 GBK/GB18030 转换后把 XML 声明里的 encoding 改成
+  UTF-8 再解析。声明为 gbk 但字节是 UTF-8 的怪文件也能处理。
+- 不做半角/全角、简繁归一；搜索和排序仍按字节序，中文书名之间的自然排序
+  依赖 `naturalLess` 的数字段比较。
+
+### 7.16 git 与隐私（开源）
 
 - 仓库：`github.com/Bilibilimoon/keda-shelf`，main 分支直接提交，发版打 tag
   （`v0.3.0` 格式）。`.gitignore` 排除 Go 工具链、构建产物、备份、testdata。
@@ -464,7 +520,8 @@ python3 tools/smoke_test.py --base http://127.0.0.1:15080 \
 ```
 
 冒烟覆盖：healthz 免认证、匿名/错密 401、catalog 结构、书库入口（多根时）、
-最近添加、系列/书目链接、Range 206、完整下载、封面 JPEG、epub 类型与内嵌
+最近添加、OPDS 搜索（OpenSearch 描述、真实系列命中、空查询与无结果查询）、
+系列/书目链接、Range 206、完整下载、封面 JPEG、epub 类型与内嵌
 元数据、`/dav/` 404、管理页、status API、Basic Auth 对全部管理 API 403，
 以及 `--gateway-admin`（模拟 fnOS 网关管理员）：目录权限设置/父目录覆盖/
 复位、日志、导出；`--scrape`（配 `--scrape-source bangumi --scrape-base
@@ -487,6 +544,10 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 ### 9.3 手工检查清单（发版前）
 
 - [ ] `go test .` 与 `smoke_test.py`（单根 + 双根）全 PASS
+- [ ] 搜索：OpenSearch 描述可访问；搜真实系列名有条目；空查询无结果
+- [ ] 自动扫描：留库不动一轮日志 "no changes"；新增目录后下一轮自动出现
+- [ ] RAR 封面：放一个 .cbr 到库里，封面不是占位图（纯灰卡）
+- [ ] GBK：用 GBK 字节命名的目录/书名在 feed 里显示为中文
 - [ ] 桌面入口能打开管理页（网关模式，靠 `X-Trim-Username`）
 - [ ] 管理页显示正确的 LAN IP 与 OPDS 地址
 - [ ] 普通 NAS 用户桌面看不到入口；管理员能打开并管理
@@ -500,7 +561,7 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 
 | 项 | 值 |
 |---|---|
-| 已安装版本 | 0.4.0（重装升级；0.3.x 期间用热替换，见下） |
+| 已安装版本 | 0.5.0（重装升级；0.3.x 期间用热替换，见下） |
 | 显示名 | 可达书柜（原名「漫画网关」，0.3.0 更名；appname 保持 `mangagate` 不变） |
 | 端口 | 5080 |
 | 漫画库 | 单个授权目录（示例测试库，5 系列 / 5 本） |
@@ -524,7 +585,8 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 ## 11. 已知限制
 
 - 无内置 HTTPS 证书申请；Basic Auth 明文 HTTP 仅适合局域网（可配置自有证书）。
-- RAR/CBR 不解析，封面为占位图；页数未知。
+- RAR/CBR 用纯 Go 解出封面，但页数不统计（逐页解压太慢）；加密 RAR
+  或首图格式不受支持时仍是占位图。
 - 图片目录动态 zip 不支持 Range。
 - HEIC/AVIF 被当作图片扫描，但 Go 解码器不支持，纯 HEIC 目录封面为占位图。
 - PDF 无内嵌元数据（扫描版 Info 基本为空），只靠在线刮削。
@@ -535,6 +597,11 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
   （需代理）。全自动匹配刻意不做（`scrapeConfident` 高门槛）。
 - `rescan` 会新建 `library` 对象，旧请求可能短暂看到旧快照（可接受）。
 - 批量刮削的限速（700ms/系列）意味着 500 个系列约跑 6 分钟，期间可随时停止。
+- 自动扫描是全量目录遍历（未变化压缩包不重开，但每个文件仍会 stat）；
+  超大库（数十万文件）可把间隔调大或设 0 改用手动扫描。
+- GBK 转换只覆盖显示层，且不做简繁/全半角归一；GBK 以外的编码（Big5 等）
+  仍会显示乱码。
+- 搜索是内存子串匹配，没有分词和拼音/首字母搜索；词序必须与文本一致。
 
 ## 12. 修改指南
 
