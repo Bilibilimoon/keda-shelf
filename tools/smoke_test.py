@@ -72,7 +72,7 @@ class GatewayClient:
         self.sock_path = sock_path
         self.name = name
 
-    def req(self, path, method="GET", body=None):
+    def req(self, path, method="GET", body=None, headers=None):
         conn = http.client.HTTPConnection("localhost", timeout=20)
 
         def _connect():
@@ -81,14 +81,15 @@ class GatewayClient:
             conn.sock = s
 
         conn.connect = _connect
-        headers = {
+        hdrs = {
             "X-Trim-Username": self.name,
             "X-Trim-Isadmin": "true",
             "X-Requested-With": "mangagate",
         }
         if body is not None:
-            headers["Content-Type"] = "application/json"
-        conn.request(method, "/app/mangagate" + path, body=body, headers=headers)
+            hdrs["Content-Type"] = "application/json"
+        hdrs.update(headers or {})
+        conn.request(method, "/app/mangagate" + path, body=body, headers=hdrs)
         resp = conn.getresponse()
         out = (resp.status, dict(resp.getheaders()), resp.read())
         conn.close()
@@ -99,14 +100,65 @@ def href_path(href):
     return urllib.parse.urlparse(href).path
 
 
+def multipart_body(boundary, fields, filename, data):
+    """Build a multipart/form-data body for the manual-cover upload endpoint."""
+    out = b""
+    for k, v in fields.items():
+        out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n"
+                f"{v}\r\n").encode()
+    out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+    out += data
+    out += f"\r\n--{boundary}--\r\n".encode()
+    return out
+
+
 def feed_titles(body):
     return [e.find("a:title", NS).text or "" for e in ET.fromstring(body).findall("a:entry", NS)]
+
+
+def jpeg_dimensions(data):
+    """Return (width, height) of a JPEG's SOF segment, or None."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF or data[i + 1] in (0x00, 0xFF):
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = (data[i + 5] << 8) | data[i + 6]
+            w = (data[i + 7] << 8) | data[i + 8]
+            return (w, h)
+        if i + 4 > len(data):
+            return None
+        i += 2 + ((data[i + 2] << 8) | data[i + 3])
+    return None
 
 
 class MockBangumi:
     """A tiny stand-in for api.bgm.tv, served on an ephemeral local port."""
 
-    JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 96
+    # A real 8x8 JPEG (not just a magic prefix): the server must be able to
+    # decode it to exercise thumbnail generation from the downloaded cover.
+    JPEG = base64.b64decode(
+        "/9j/2wCEAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYW"
+        "ICwgIyYnKSopGR8tMC0oMCUoKSgBBwcHCggKEwoKEygaFhooKCgoKCgoKCgoKCgoKCgo"
+        "KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKP/AABEIAAgACAMBIgACEQED"
+        "EQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAAB"
+        "fQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkq"
+        "NDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SV"
+        "lpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq"
+        "8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUE"
+        "BAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZ"
+        "GiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeI"
+        "iYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl"
+        "5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/AMKiiisD9GP/2Q=="
+    )
 
     def __init__(self, port=0):
         self.last_keyword = ""
@@ -288,8 +340,20 @@ def main():
 
         thumb = target.rsplit("/", 1)[0] + "/thumbnail"
         s, h, b = c.req(thumb)
+        dim = jpeg_dimensions(b)
         check("cover is jpeg", s == 200 and h.get("Content-Type") == "image/jpeg"
-              and b[:2] == b"\xff\xd8", f"status={s} bytes={len(b)}")
+              and dim is not None and max(dim) <= 640,
+              f"status={s} dim={dim} bytes={len(b)}")
+
+        orig = target.rsplit("/", 1)[0] + "/cover"
+        s, h, b = c.req(orig)
+        odim = jpeg_dimensions(b)
+        # Sample-library pages are 720x1080: the original must come back
+        # unscaled while the thumbnail is capped at 640.
+        check("original cover served",
+              s == 200 and h.get("Content-Type", "").startswith("image/")
+              and odim == (720, 1080),
+              f"status={s} type={h.get('Content-Type')} dim={odim} bytes={len(b)}")
 
     # EPUB books must be scanned and served with the epub media type.
     epub_books = []
@@ -430,6 +494,21 @@ def main():
               and "attachment" in (h.get("Content-Disposition") or ""))
         check("gateway admin exports config", ok, f"status={s} bytes={len(b)}")
 
+        # Cover cache management: report usage, clear, and regenerate lazily.
+        s, _, b = gw.req("/api/cache/status")
+        d = json.loads(b) if s == 200 else {}
+        check("cache status reports usage", s == 200 and d.get("files", 0) > 0,
+              f"status={s} {d}")
+        s, _, b = gw.req("/api/cache/clear", "POST",
+                         json.dumps({"level": "all", "id": ""}).encode())
+        d = json.loads(b) if s == 200 else {}
+        check("cache clear frees files",
+              s == 200 and d.get("ok") and d.get("files", 0) > 0,
+              f"status={s} {d}")
+        s, _, b = c.req(series_paths[0] + "/thumbnail")
+        check("cache regenerates thumbnail on demand",
+              s == 200 and jpeg_dimensions(b) is not None, f"status={s}")
+
         if args.scrape:
             mock = MockBangumi(args.scrape)
             mock.start()
@@ -460,8 +539,15 @@ def main():
                 check("scraped author in catalog", "山田花子".encode() in b)
                 check("scraped summary in catalog", "星海间旅行".encode() in b)
 
-                s, _, b = gw.req("/opds/v1.2/series/" + sid + "/thumbnail")
-                check("scraped cover served",
+                s, _, b = c.req("/opds/v1.2/series/" + sid + "/thumbnail")
+                dim = jpeg_dimensions(b)
+                check("scraped thumbnail served",
+                      s == 200 and dim is not None and max(dim) <= 640
+                      and b != MockBangumi.JPEG,
+                      f"status={s} dim={dim} bytes={len(b)}")
+
+                s, _, b = c.req("/opds/v1.2/series/" + sid + "/cover")
+                check("scraped original served",
                       s == 200 and b == MockBangumi.JPEG,
                       f"status={s} bytes={len(b)}")
 
@@ -469,6 +555,59 @@ def main():
                     "level": "series", "id": sid}).encode())
                 s, _, b = c.req("/opds/v1.2/catalog")
                 check("scrape remove restores catalog", "山田花子".encode() not in b)
+
+                # Manual cover: upload wins over the built-in cover, survives
+                # export/import, and clearing restores the default.
+                with_books = [x for x in rows if x.get("books", 0) > 0]
+                msid = (with_books or rows)[0]["id"]
+                boundary = "----mangagate-smoke"
+                body = multipart_body(boundary, {"level": "series", "id": msid},
+                                      "cover.jpg", MockBangumi.JPEG)
+                s, _, b = gw.req("/api/cover/upload", "POST", body, headers={
+                    "Content-Type": "multipart/form-data; boundary=" + boundary})
+                check("manual cover upload accepted",
+                      s == 200 and json.loads(b).get("ok"), f"status={s}")
+
+                s, _, b = c.req("/opds/v1.2/series/" + msid + "/cover")
+                check("manual cover overrides default",
+                      s == 200 and jpeg_dimensions(b) == (8, 8),
+                      f"status={s} dim={jpeg_dimensions(b)}")
+                s, _, b = c.req("/opds/v1.2/series/" + msid + "/thumbnail")
+                check("manual cover thumbnail generated",
+                      s == 200 and jpeg_dimensions(b) == (8, 8),
+                      f"status={s} dim={jpeg_dimensions(b)}")
+
+                s, _, b = gw.req("/api/scrape/status")
+                mrow = [x for x in json.loads(b).get("series", []) if x["id"] == msid]
+                check("scrape status marks manual cover",
+                      bool(mrow) and mrow[0].get("manual") is True)
+
+                s, _, raw = gw.req("/api/export")
+                bundle = json.loads(raw) if s == 200 else {}
+                mc = bundle.get("manual_covers") or []
+                check("export embeds manual cover image",
+                      s == 200 and len(mc) == 1 and mc[0]["id"] == msid
+                      and len(mc[0].get("data") or "") > 0,
+                      f"status={s} covers={len(mc)}")
+
+                s, _, _ = gw.req("/api/cover/manual/clear", "POST",
+                                 json.dumps({"level": "series", "id": msid}).encode())
+                s, _, b = c.req("/opds/v1.2/series/" + msid + "/cover")
+                check("manual cover clear restores default",
+                      s == 200 and jpeg_dimensions(b) != (8, 8),
+                      f"status={s} dim={jpeg_dimensions(b)}")
+
+                s, _, b = gw.req("/api/import", "POST", raw)
+                d = json.loads(b) if s == 200 else {}
+                check("import restores manual cover",
+                      s == 200 and d.get("manual_covers") == 1,
+                      f"status={s} covers={d.get('manual_covers')}")
+                s, _, b = c.req("/opds/v1.2/series/" + msid + "/cover")
+                check("restored manual cover served",
+                      s == 200 and jpeg_dimensions(b) == (8, 8),
+                      f"status={s} dim={jpeg_dimensions(b)}")
+                gw.req("/api/cover/manual/clear", "POST",
+                       json.dumps({"level": "series", "id": msid}).encode())
 
                 # Batch: the mock answers every keyword with the same subject,
                 # so only the series named exactly like it auto-applies and

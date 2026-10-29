@@ -182,7 +182,10 @@
     <div class="radio-list" id="roots"><div class="empty">暂无授权目录。请先在应用设置里授权漫画所在目录。</div></div>
     <div class="form-row">
       <button class="primary" onclick="rescan()">重新扫描</button>
+      <button class="danger" onclick="clearAllCache()">清理全部封面缓存</button>
+      <span class="scrape-meta" id="cacheUsage"></span>
     </div>
+    <p class="hint">封面缓存会在扫描后自动清理失效条目。清理只删除可重新生成的图片；刮削和手动指定的封面原图会保留，下次打开时缩略图自动重建。</p>
   </div>
 
   <div class="card" id="userCard">
@@ -200,7 +203,7 @@
 
   <div class="card" id="metaCard" style="display:none">
     <h2>系列信息 <button style="margin-left:8px" onclick="loadScrape(true)">刷新</button></h2>
-    <p class="hint" style="margin-top:0">为系列或单本书匹配作品条目，补全作者、简介、标签和官方封面。epub 自带元数据时无需刮削；标「无信息」的建议搜一下。</p>
+    <p class="hint" style="margin-top:0">为系列或单本书匹配作品条目，补全作者、简介、标签和官方封面。epub 自带元数据时无需刮削；标「无信息」的建议搜一下。刮削不中时，可以点「封面」手动指定一张图片（上传或填 URL），优先级最高。</p>
     <div class="form-row" style="margin-top:0">
       <button class="primary" id="autoBtn" onclick="autoScrape()">批量尝试</button>
       <button id="autoStopBtn" style="display:none" onclick="autoScrapeStop()">停止</button>
@@ -221,7 +224,7 @@
       <input type="file" id="importFile" accept=".json,application/json" style="display:none" onchange="doImport(this)">
     </div>
     <pre class="log" id="logBox" style="display:none"></pre>
-    <p class="hint">显示最近 200 行运行日志。导出的配置包含账号信息（密码哈希），请妥善保管；导入可恢复用户、权限和刮削匹配（端口与授权目录归系统管，不导入）。</p>
+    <p class="hint">显示最近 200 行运行日志。导出的配置包含账号信息（密码哈希）、刮削匹配和手动指定的封面图片，请妥善保管；导入可恢复用户、权限、刮削匹配和手动封面（端口与授权目录归系统管，不导入）。</p>
   </div>
 
   <div class="card">
@@ -258,6 +261,27 @@
     <button onclick="document.getElementById('scrapeDlg').close()">关闭</button>
   </div>
   <p class="hint">点击候选条目完成匹配；缩略图来自 Bangumi。</p>
+</dialog>
+
+<dialog id="coverDlg">
+  <h2>封面：<span id="coverTarget"></span></h2>
+  <div style="display:flex;gap:14px;align-items:flex-start">
+    <img id="coverPreview" alt="" style="width:120px;height:168px;object-fit:cover;border:1px solid var(--line);border-radius:8px;background:#f0f4fa;flex:none">
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <input type="file" id="coverFile" accept="image/*">
+      <button class="primary" onclick="uploadCover()">上传这张图片</button>
+      <div class="form-row" style="margin-top:0">
+        <input type="text" id="coverUrl" placeholder="或填图片 URL" style="flex:1">
+        <button onclick="coverFromURL()">使用</button>
+      </div>
+    </div>
+  </div>
+  <p class="hint" id="coverState" style="margin-top:12px"></p>
+  <div class="form-row">
+    <button class="danger" id="coverResetBtn" onclick="clearManualCover()" style="display:none">恢复默认封面</button>
+    <button onclick="document.getElementById('coverDlg').close()">关闭</button>
+  </div>
+  <p class="hint">手动封面优先级最高，会覆盖刮削和内置封面。原图和缩略图都保存在本机，导出配置时会一并带上。</p>
 </dialog>
 
 <script>
@@ -336,6 +360,7 @@ function renderStatus(s) {
   if (s.is_admin) {
     loadUsers();
     if (!scrapeLoaded) { scrapeLoaded = true; loadScrape(); }
+    if (!cacheLoaded) { cacheLoaded = true; loadCacheUsage(); }
   }
 }
 
@@ -544,6 +569,8 @@ async function loadLog() {
 
 let scrapeLoaded = false;
 let scrapeTarget = null;
+let coverTarget = null;
+let cacheLoaded = false;
 
 async function loadScrape(force) {
   try {
@@ -560,9 +587,12 @@ async function loadScrape(force) {
           : (b.embedded ? "内嵌元数据" : "无信息");
         return '<div class="scrape-book">' +
           '<span class="scrape-name">' + escHtml(b.title) + '</span>' +
-          '<span class="scrape-meta">' + badge + '</span>' +
+          '<span class="scrape-meta">' + (b.manual ? "手动封面 · " : "") + badge + '</span>' +
           '<span class="scrape-actions">' +
-          '<button data-act="search" data-level="book" data-id="' + escAttr(b.id) + '"' +
+          '<button data-act="cover" data-level="book" data-id="' + escAttr(b.id) + '"' +
+          ' data-label="' + escAttr(b.title) + '" data-manual="' + (b.manual ? 1 : 0) + '">封面</button>' +
+          ' <button data-act="clear-cache" data-level="book" data-id="' + escAttr(b.id) + '">清缓存</button>' +
+          ' <button data-act="search" data-level="book" data-id="' + escAttr(b.id) + '"' +
           ' data-term="' + escAttr(b.term || b.title) + '" data-label="' + escAttr(b.title) + '">搜索</button>' +
           (b.scraped
             ? ' <button class="danger" data-act="remove" data-level="book" data-id="' + escAttr(b.id) + '">清除</button>'
@@ -572,9 +602,13 @@ async function loadScrape(force) {
       return '<details class="scrape-node"><summary>' +
         '<span class="scrape-name">' + escHtml(sr.name) + '</span>' +
         '<span class="scrape-meta">' + escHtml(sr.rel) + " · " + sr.books + " 本 · " +
+        (sr.manual ? "手动封面 · " : "") +
         (sr.scraped ? "已匹配：" + escHtml(sr.title) : "未匹配") + "</span>" +
         '<span class="scrape-actions">' +
-        '<button data-act="search" data-level="series" data-id="' + escAttr(sr.id) + '"' +
+        '<button data-act="cover" data-level="series" data-id="' + escAttr(sr.id) + '"' +
+        ' data-label="' + escAttr(sr.name) + '" data-manual="' + (sr.manual ? 1 : 0) + '">封面</button>' +
+        ' <button data-act="clear-cache" data-level="series" data-id="' + escAttr(sr.id) + '">清缓存</button>' +
+        ' <button data-act="search" data-level="series" data-id="' + escAttr(sr.id) + '"' +
         ' data-term="' + escAttr(sr.term || sr.name) + '" data-label="' + escAttr(sr.name) + '">搜索</button>' +
         (sr.scraped
           ? ' <button class="danger" data-act="remove" data-level="series" data-id="' + escAttr(sr.id) + '">清除</button>'
@@ -624,6 +658,10 @@ $("metaCard").addEventListener("click", (ev) => {
     openScrape(d.level, d.id, d.term || d.label, d.label);
   } else if (d.act === "remove") {
     removeScrape(d.level, d.id);
+  } else if (d.act === "cover") {
+    openCover(d.level, d.id, d.label, d.manual === "1");
+  } else if (d.act === "clear-cache") {
+    clearCache(d.level, d.id);
   } else if (d.act === "apply-suggest") {
     applySuggest(d.id, Number(d.sid));
   } else if (d.act === "ignore-suggest") {
@@ -669,7 +707,7 @@ async function doImport(input) {
   const f = input.files && input.files[0];
   input.value = "";
   if (!f) return;
-  if (!confirm("导入会覆盖同名用户的密码和权限，并恢复刮削匹配，确认继续？")) return;
+  if (!confirm("导入会覆盖同名用户的密码和权限，恢复刮削匹配和手动封面，确认继续？")) return;
   try {
     const res = await fetch("api/import", {
       method: "POST",
@@ -679,7 +717,8 @@ async function doImport(input) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || ("导入失败 " + res.status));
-    toast("导入完成：新增 " + data.users_added + " 个用户，更新 " + data.users_updated + " 个");
+    toast("导入完成：新增 " + data.users_added + " 个用户，更新 " + data.users_updated +
+      " 个，" + (data.manual_covers || 0) + " 张手动封面");
     loadStatus();
     loadUsers();
     scrapeLoaded = true;
@@ -762,6 +801,118 @@ async function removeScrape(level, id) {
     loadScrape();
   } catch (e) { toast(e.message); }
 }
+
+// --- manual cover ---
+
+function refreshCoverPreview() {
+  if (!coverTarget) return;
+  const q = "level=" + encodeURIComponent(coverTarget.level) +
+    "&id=" + encodeURIComponent(coverTarget.id) + "&t=" + Date.now();
+  $("coverPreview").src = "api/cover/preview?" + q;
+}
+
+function openCover(level, id, label, manual) {
+  coverTarget = { level, id, manual: !!manual };
+  $("coverTarget").textContent = label || "";
+  $("coverFile").value = "";
+  $("coverUrl").value = "";
+  $("coverState").textContent = manual ? "当前使用手动封面" : "当前使用默认封面";
+  $("coverResetBtn").style.display = manual ? "" : "none";
+  refreshCoverPreview();
+  $("coverDlg").showModal();
+}
+
+function coverChanged() {
+  if (coverTarget) {
+    coverTarget.manual = true;
+    $("coverResetBtn").style.display = "";
+    $("coverState").textContent = "当前使用手动封面";
+    refreshCoverPreview();
+  }
+  loadScrape(false);
+  loadCacheUsage();
+}
+
+async function uploadCover() {
+  if (!coverTarget) return;
+  const f = $("coverFile").files && $("coverFile").files[0];
+  if (!f) return toast("请选择图片文件");
+  const fd = new FormData();
+  fd.append("level", coverTarget.level);
+  fd.append("id", coverTarget.id);
+  fd.append("file", f);
+  try {
+    const res = await fetch("api/cover/upload", {
+      method: "POST",
+      headers: { "X-Requested-With": "mangagate" },
+      credentials: "same-origin",
+      body: fd,
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.error || ("上传失败 " + res.status));
+    toast("封面已更新");
+    coverChanged();
+  } catch (e) { toast(e.message); }
+}
+
+async function coverFromURL() {
+  if (!coverTarget) return;
+  const url = $("coverUrl").value.trim();
+  if (!url) return toast("请填写图片地址");
+  try {
+    await api("api/cover/manual", {
+      method: "POST",
+      body: JSON.stringify({ level: coverTarget.level, id: coverTarget.id, url }),
+    });
+    toast("封面已更新");
+    coverChanged();
+  } catch (e) { toast(e.message); }
+}
+
+async function clearManualCover() {
+  if (!coverTarget) return;
+  if (!confirm("恢复默认封面？手动指定的图片会被删除。")) return;
+  try {
+    await api("api/cover/manual/clear", {
+      method: "POST",
+      body: JSON.stringify({ level: coverTarget.level, id: coverTarget.id }),
+    });
+    coverTarget.manual = false;
+    $("coverResetBtn").style.display = "none";
+    $("coverState").textContent = "当前使用默认封面";
+    refreshCoverPreview();
+    toast("已恢复默认封面");
+    loadScrape(false);
+    loadCacheUsage();
+  } catch (e) { toast(e.message); }
+}
+
+// --- cover cache ---
+
+async function loadCacheUsage() {
+  try {
+    const d = await api("api/cache/status");
+    $("cacheUsage").textContent = "封面缓存：" + d.files + " 个文件，" + fmtSize(d.bytes);
+  } catch (e) { $("cacheUsage").textContent = ""; }
+}
+
+async function clearCache(level, id) {
+  if (level === "all" && !confirm("清理全部封面缓存？图片会在下次打开时重新生成，刮削和手动封面的原图会保留。")) return;
+  if (level !== "all" && !confirm("清除该范围的封面缓存？图片会在下次打开时重新生成，刮削和手动封面的原图会保留。")) return;
+  try {
+    const d = await api("api/cache/clear", {
+      method: "POST",
+      body: JSON.stringify({ level, id: id || "" }),
+    });
+    toast("已清除 " + d.files + " 个文件，释放 " + fmtSize(d.bytes));
+    loadCacheUsage();
+    if (coverTarget && (level === "all" || (level === coverTarget.level && id === coverTarget.id))) {
+      refreshCoverPreview();
+    }
+  } catch (e) { toast(e.message); }
+}
+
+function clearAllCache() { clearCache("all", ""); }
 
 async function addUser() {
   const name = $("newUser").value.trim();

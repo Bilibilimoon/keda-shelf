@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -359,8 +360,9 @@ func (s *server) seriesEntry(r *http.Request, sr *Series) opdsEntry {
 	}
 	if cover != "" {
 		thumb := baseURL(r) + opdsRoot + "/books/" + cover + "/thumbnail"
+		orig := baseURL(r) + opdsRoot + "/books/" + cover + "/cover"
 		e.Links = append(e.Links,
-			opdsLink{Rel: relImage, Href: thumb, Type: "image/jpeg"},
+			opdsLink{Rel: relImage, Href: orig, Type: "image/jpeg"},
 			opdsLink{Rel: relThumbnail, Href: thumb, Type: "image/jpeg"},
 		)
 	}
@@ -398,6 +400,20 @@ func (s *server) serveSeriesRoute(w http.ResponseWriter, r *http.Request, rest s
 			cover = sr.Books[0].ID
 		}
 		s.serveCover(w, r, s.lib.findBook(cover))
+		return
+	}
+	if strings.HasSuffix(rest, "/cover") {
+		id := strings.TrimSuffix(rest, "/cover")
+		sr := s.lib.findSeries(id)
+		if sr == nil || !perm.ok(sr.Rel) {
+			http.NotFound(w, r)
+			return
+		}
+		cover := sr.Cover
+		if cover == "" && len(sr.Books) > 0 {
+			cover = sr.Books[0].ID
+		}
+		s.serveOriginalCover(w, r, s.lib.findBook(cover))
 		return
 	}
 	sr := s.lib.findSeries(rest)
@@ -455,7 +471,7 @@ func (s *server) bookEntry(r *http.Request, b *Book) opdsEntry {
 		Content:    opdsContent{Type: "text", Value: content},
 		Links: []opdsLink{
 			{Rel: relAcquire, Href: baseURL(r) + opdsRoot + "/books/" + b.ID + "/file", Type: typ, Length: size},
-			{Rel: relImage, Href: baseURL(r) + opdsRoot + "/books/" + b.ID + "/thumbnail", Type: "image/jpeg"},
+			{Rel: relImage, Href: baseURL(r) + opdsRoot + "/books/" + b.ID + "/cover", Type: "image/jpeg"},
 			{Rel: relThumbnail, Href: baseURL(r) + opdsRoot + "/books/" + b.ID + "/thumbnail", Type: "image/jpeg"},
 		},
 	}
@@ -520,6 +536,16 @@ func (s *server) serveBookRoute(w http.ResponseWriter, r *http.Request, rest str
 		s.serveCover(w, r, b)
 		return
 	}
+	if strings.HasSuffix(rest, "/cover") {
+		id := strings.TrimSuffix(rest, "/cover")
+		b := s.lib.findBook(id)
+		if b == nil || !perm.ok(b.Rel) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveOriginalCover(w, r, b)
+		return
+	}
 	b := s.lib.findBook(rest)
 	if b == nil || !perm.ok(b.Rel) {
 		http.NotFound(w, r)
@@ -535,7 +561,7 @@ func (s *server) serveCover(w http.ResponseWriter, r *http.Request, b *Book) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	var raw []byte
-	if raw = s.scrapedCoverJPEG(b); len(raw) == 0 {
+	if raw = s.storedThumbnail(b); len(raw) == 0 {
 		raw = coverJPEG(b, s.dataDir)
 	}
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(raw)))
@@ -544,23 +570,111 @@ func (s *server) serveCover(w http.ResponseWriter, r *http.Request, b *Book) {
 	}
 }
 
-// scrapedCoverJPEG serves the downloaded official cover when either the book
-// or its series has a confirmed match; the book's own match wins.
-func (s *server) scrapedCoverJPEG(b *Book) []byte {
+// serveOriginalCover answers the OPDS "image" relation with the full-size
+// cover: the scraped original when present, otherwise the cover extracted
+// from the book itself. It falls back to the thumbnail when no original is
+// available so clients following the link still get a picture.
+func (s *server) serveOriginalCover(w http.ResponseWriter, r *http.Request, b *Book) {
+	raw, ctype := s.originalCover(b)
+	if len(raw) == 0 {
+		raw, ctype = coverJPEG(b, s.dataDir), "image/jpeg"
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(raw)))
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(raw)
+	}
+}
+
+// storedCoverFile returns the base name of the highest-priority stored cover
+// for the book: an admin-supplied image (book first, then series) beats a
+// scraped one (same order). Stored images are served through their own
+// endpoints and never go through the book extractor.
+func (s *server) storedCoverFile(b *Book) string {
+	if b == nil {
+		return ""
+	}
+	if c := s.meta.manual("book", b.ID); c != nil && c.File != "" {
+		return filepath.Base(c.File)
+	}
+	if c := s.meta.manual("series", b.SeriesID); c != nil && c.File != "" {
+		return filepath.Base(c.File)
+	}
+	if info := s.meta.book(b.ID); info != nil && info.Cover != "" {
+		return filepath.Base(info.Cover)
+	}
+	if info := s.meta.series(b.SeriesID); info != nil && info.Cover != "" {
+		return filepath.Base(info.Cover)
+	}
+	return ""
+}
+
+// originalCover returns the stored cover when the book or its series has a
+// manual or scraped match, otherwise the full-size cover extracted from the
+// book itself.
+func (s *server) originalCover(b *Book) ([]byte, string) {
+	if b == nil {
+		return nil, ""
+	}
+	if file := s.storedCoverFile(b); file != "" {
+		// Covers live flat under covers/; Base keeps a tampered sidecar file
+		// from pointing outside that directory.
+		if raw, err := os.ReadFile(filepath.Join(coverDir(s.dataDir), file)); err == nil && len(raw) > 0 {
+			return raw, detectImageType(raw)
+		}
+	}
+	if raw := coverOriginalJPEG(b, s.dataDir); len(raw) > 0 {
+		return raw, "image/jpeg"
+	}
+	return nil, ""
+}
+
+// storedThumbnail serves the thumbnail of a stored cover (manual first, then
+// scraped); unlike the original it is always a small JPEG, generated from the
+// stored image on first use for covers downloaded before thumbnails were kept.
+func (s *server) storedThumbnail(b *Book) []byte {
 	if b == nil {
 		return nil
 	}
-	for _, info := range []*scrapedInfo{s.meta.book(b.ID), s.meta.series(b.SeriesID)} {
-		if info == nil || info.Cover == "" {
-			continue
-		}
-		// Covers live flat under covers/; Base keeps a tampered sidecar file
-		// from pointing outside that directory.
-		if raw, err := os.ReadFile(filepath.Join(coverDir(s.dataDir), filepath.Base(info.Cover))); err == nil && len(raw) > 0 {
-			return raw
-		}
+	file := s.storedCoverFile(b)
+	if file == "" {
+		return nil
 	}
-	return nil
+	return storedCoverThumbnail(coverDir(s.dataDir), file)
+}
+
+// storedCoverThumbnail reads the pre-generated thumbnail of one stored cover,
+// lazily generating and caching it when an older version stored only the
+// original. It returns nil when the image is missing or undecodable.
+func storedCoverThumbnail(dir, file string) []byte {
+	orig := filepath.Join(dir, filepath.Base(file))
+	thumb := filepath.Join(dir, thumbName(filepath.Base(file)))
+	if raw, err := os.ReadFile(thumb); err == nil && len(raw) > 0 {
+		return raw
+	}
+	raw, err := os.ReadFile(orig)
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	img, err := decodeLimited(bytes.NewReader(raw))
+	if err != nil {
+		return nil
+	}
+	out := encodeCover(img)
+	if len(out) == 0 {
+		return nil
+	}
+	_ = os.WriteFile(thumb, out, 0o644)
+	return out
+}
+
+// detectImageType sniffs the image format of raw bytes, defaulting to JPEG.
+func detectImageType(raw []byte) string {
+	if t := http.DetectContentType(raw); strings.HasPrefix(t, "image/") {
+		return t
+	}
+	return "image/jpeg"
 }
 
 func (s *server) serveBookFile(w http.ResponseWriter, r *http.Request, perm *dirPerm, id string) {

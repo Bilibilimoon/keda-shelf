@@ -1,6 +1,6 @@
 # 可达书柜（mangagate）开发记录（面向后续维护者 / AI）
 
-最后更新：2026-10-27，对应版本 **0.5.1**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
+最后更新：2026-10-29，对应版本 **0.6.0**（源码仓库 `github.com/Bilibilimoon/keda-shelf`）。
 当前发布渠道：GitHub Releases（每个 tag 挂 `mangagate.fpk`）。
 
 这份文档记录「为什么这么做」和「踩过哪些坑」，README.md 只讲用户怎么装怎么用。
@@ -84,25 +84,26 @@ python3 tools/smoke_test.py --base http://127.0.0.1:5080 \
 | 应用 home（测试库放这里） | `/vol1/@apphome/mangagate/`（`TRIM_PKGHOME`） |
 | 生命周期脚本 | `/var/apps/mangagate/cmd/` |
 
-## 4. 代码地图（src/，约 4600 行，含测试）
+## 4. 代码地图（src/，约 7500 行，含测试与内嵌前端）
 
 | 文件 | 职责 | 关键函数 |
 |---|---|---|
 | `main.go` | 参数解析、目录准备、用户初始化、库扫描（含缓存加载/后台重扫）、两个 listener、优雅退出、路由注册 | `main`, `routes`, `adminOnly`, `stripPrefix`, `resolvePort`, `ensureUsers` |
 | `config.go` | `config.json` / `users.json` 读写、授权路径解析 | `loadConfig`, `saveConfig`, `resolveRoots`, `loadUsers`, `UserStore.*` |
 | `auth.go` | `server` 结构体、Basic Auth、网关信任、按 IP 限速 | `requireAuth`, `gatewayAuth`, `rateLimiter` |
-| `library.go` | 多根目录扫描、`Series`/`Book` 模型、页数统计与缓存沿用、异常收集、自然排序、扫描缓存（v2） | `library.scan`, `scanDir`, `makeBook`, `prevBook`, `saveCache`, `loadLibraryCache`, `naturalLess` |
+| `library.go` | 多根目录扫描、卷目录归组、`Series`/`Book` 模型、页数统计与缓存沿用、异常收集、自然排序、扫描缓存（v2） | `library.scan`, `scanDir`, `scanWalk`, `scanOpts`, `isVolumeName`, `looksLikeVolumes`, `sortBooks`, `makeBook`, `prevBook`, `saveCache`, `loadLibraryCache`, `naturalLess` |
 | `epub.go` | epub OPF / cbz ComicInfo.xml 内嵌元数据提取、封面声明解析（含 URL 转义） | `archiveMetadata`, `epubMetadata`, `comicInfoMetadata`, `opfCoverPath`, `plainText` |
-| `scrape.go` | 刮削：AniList/Bangumi 双源客户端、搜索词清洗、置信度判断、元数据覆盖层（含建议/忽略） | `newScraper`, `Search`, `Subject`, `cleanSearchTerm`, `scrapeConfident`, `metaStore.*`, `dirPerm` 在 opds.go |
-| `opds.go` | OPDS 1.2 feed（根/书库/系列/最近添加/搜索，全部分页）、目录权限过滤、下载、封面路由、dc 元数据 | `handleOPDS`, `serveRootFeed`, `serveLibraryFeed`, `serveRecent`, `pageEntries`, `reqPerm`, `bookEntry`, `serveBookFile` |
-| `cover.go` | 封面链（刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、320px JPEG 缓存、受控解码（`decodeLimited`）、zip 与 RAR/CBR 首图 | `coverJPEG`, `scrapedCoverJPEG`(opds.go), `extractCoverImage`, `imageFromZipEntry`, `firstImageInZip`, `firstImageInRar`, `decodeLimited`, `encodeCover` |
+| `scrape.go` | 刮削：AniList/Bangumi 双源客户端、搜索词清洗、置信度判断、元数据覆盖层（含建议/忽略、手动封面记录） | `newScraper`, `Search`, `Subject`, `cleanSearchTerm`, `scrapeConfident`, `metaStore.*`, `setManual`, `clearManual`, `storedCoverFiles`, `dirPerm` 在 opds.go |
+| `opds.go` | OPDS 1.2 feed（根/书库/系列/最近添加/搜索，全部分页）、目录权限过滤、下载、封面路由（缩略图/原图、手动封面优先）、dc 元数据 | `handleOPDS`, `serveRootFeed`, `serveLibraryFeed`, `serveRecent`, `pageEntries`, `reqPerm`, `bookEntry`, `serveBookFile`, `storedCoverFile`, `originalCover`, `storedThumbnail` |
+| `cover.go` | 封面链（手动封面 > 刮削封面 > 声明封面 > 首图 > 占位）、按书并发锁 + 总并发 4、640px 缩略图 + 原图双档缓存（`.t6` 版本后缀惰性迁移）、手动封面重编码入库、受控解码（`decodeLimited`）、zip 与 RAR/CBR 首图 | `coverJPEG`, `coverOriginalJPEG`, `cachedCoverJPEG`, `saveManualCover`, `removeStoredCover`, `bookCacheNames`, `thumbName`, `encodeOriginalJPEG`, `extractCoverImage`, `extractCoverBytes`, `imageFromZipEntry`, `firstImageInZip`, `firstImageInRar`, `decodeLimited`, `encodeCover` |
+| `cache.go` | 封面缓存生命周期：用量统计、有效缓存集合、扫描后自动清理过期文件（24h 节流）、按单书/系列/全部手动清除（保留刮削与手动封面原图） | `coverCacheUsage`, `validCoverCache`, `cleanCoverCache`, `maybeCleanCoverCache`, `bookCacheTargets`, `clearCacheFiles`, `clearAllCoverCache` |
 | `encoding.go` | 中文编码兼容：GBK/GB18030 显示名转换（zip 条目、本地文件名）、GBK 内嵌元数据解码 | `displayName`, `zipEntryName`, `xmlDecode` |
 | `search.go` | OPDS 搜索：多关键词 AND、可搜索文本（书名/系列/目录/内嵌与刮削元数据） | `searchTerms`, `bookSearchText`, `bookSearchWithScrape`, `matchesAllTerms` |
 | `tls.go` | 同端口 HTTP/HTTPS 协议识别、证书加载 | `loadTLSConfig`, `sniffListener` |
-| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、日志、导入导出、输入校验（`validUsername` / `validScrapeID`）、手动与自动扫描共用的 `runScan` | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `runAutoScrape`, `applySubject`, `startScan`, `runScan`, `autoScanLoop`, `apiImport`, `apiExport`, `validUsername`, `validScrapeID` |
+| `admin.go` | 管理页与 JSON API：状态/扫描进度/异常、用户与权限、刮削（搜索/匹配/批量/建议/忽略）、手动封面（上传/URL/清除/预览）、封面缓存（用量/清除）、日志、导入导出（手动封面内嵌 base64）、输入校验（`validUsername` / `validScrapeID`）、手动与自动扫描共用的 `runScan` | `apiStatus`, `api*User*`, `apiUserPerm`, `apiScrape*`, `apiCover*`, `apiCache*`, `runAutoScrape`, `applySubject`, `applyManualCoverBytes`, `startScan`, `runScan`, `autoScanLoop`, `apiImport`, `apiExport`, `validUsername`, `validScrapeID` |
 | `admin.html` | 管理页前端（内嵌 `go:embed`，相对路径请求） | — |
 | `util.go` | MIME、ID、LAN IP 探测、日志尾部读取 | `hashID`, `detectLANIP`, `readLogTail` |
-| `*_test.go` | 单元测试（清洗/置信度/归并/epub 解析/扫描器/多根前缀/异常/缓存回路/分页/受控解码/输入校验） | `go test .` |
+| `*_test.go` | 单元测试（清洗/置信度/归并/epub 解析/扫描器/多根前缀/异常/缓存回路/分页/受控解码/输入校验/手动封面优先级/缓存清理范围） | `go test .` |
 
 ### 数据模型
 
@@ -131,27 +132,38 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
    `System Volume Information`、`lost+found`、`Thumbs.db`、`desktop.ini`。
 2. 跳过符号链接（`os.ModeSymlink`），防止逃出授权目录。
 3. 目录内有压缩包（`.cbz/.zip/.cbr/.rar/.cb7/.pdf/.epub`）→ 该目录是一个 **Series**，
-   每个压缩包是一本 **Book**。
-4. 目录内只有图片且没有压缩包 → 整个目录是一本 **Book**（`Format="dir"`），
-   归到父级 Series。
-5. 有子目录 → 递归（最大深度 8），子目录各自成 Series。
-6. 排序用 `naturalLess`，保证「第2卷」在「第10卷」之前。
-7. zip/cbz/cb7/epub 的页数在扫描时统计（`countZipPages`），同时提取内嵌元数据
+   每个压缩包是一本 **Book**；该目录下的图片目录全部并入这个 Series 当卷。
+4. 目录内只有图片且没有压缩包 → 整个目录是一本 **Book**（`Format="dir"`）。
+   这本书是「卷」还是「作品」由父级决定（见下条），不再一律自成 Series。
+5. **卷目录归组**（`isVolumeName` / `looksLikeVolumes`）：某一层自己不放任何文件、
+   子目录又都像卷（`第01卷`、`番外04`、`BD特典1`、`第61話`、`连载版213`、
+   `Vol. 3`、`Ch. 12`、纯数字，可带 `[汉化组]` 前缀）时，这一层合成一个 Series，
+   卷是它的 Book。古典布局「一个文件夹一部漫画」因名字不像卷而不受影响。
+6. **容器与包装目录**：自己不放东西、下面每层各自提供 Series 的目录
+   （`epub格式的漫画`）不成为 Series；只包着一部作品的中间层
+   （`别当欧尼酱了/KOX/`）也不成为 Series，系列名取有意义的上一层
+   （`scanWalk.adopted` 防止继续向上改名）。
+7. 有子目录 → 递归（最大深度 8）。父级是「作品」时（`scanOpts.absorb`），
+   下面的图片目录一律当卷，不再各自判断；授权根目录不算作品，免得根下的
+   散包把它所有文件夹变成卷。
+8. 排序用 `naturalLess`，保证「第2卷」在「第10卷」之前；`sortBooks` 再把
+   `番外/特典/番外/短篇` 这类外传排到正篇之后。
+9. zip/cbz/cb7/epub 的页数在扫描时统计（`countZipPages`），同时提取内嵌元数据
    （`archiveMetadata`）；RAR/PDF 不解包。
-8. **缓存沿用**：mtime + 大小与上次一致的压缩包，直接沿用旧页数和旧元数据，
+10. **缓存沿用**：mtime + 大小与上次一致的压缩包，直接沿用旧页数和旧元数据，
    不再开 zip——扫描慢的大头从来不是遍历目录而是逐个开压缩包。
-9. **异常收集**：读不了的目录、打不开的压缩包记入 `problems`（上限 500 条），
+11. **异常收集**：读不了的目录、打不开的压缩包记入 `problems`（上限 500 条），
    管理页「扫描异常」列表展示，不静默缺书。
-10. **多根**：`library.roots` 是全部授权目录。只有一个根时 rel 无前缀（0.2.x
+12. **多根**：`library.roots` 是全部授权目录。只有一个根时 rel 无前缀（0.2.x
     兼容）；多个根时 rel 以 `根目录 basename` 为前缀，OPDS 根 feed 给每个书库
     一个 `/opds/v1.2/lib/{书库名}` 入口，权限树第一层即书库。
-11. 扫描结果持久化到 `${TRIM_PKGVAR}/library.json`（v2 存 `roots` 数组；能读
+13. 扫描结果持久化到 `${TRIM_PKGVAR}/library.json`（v2 存 `roots` 数组；能读
     v1 单根旧缓存）。启动时缓存命中且根一致 → 立即服务 + 后台重扫；不一致 → 全量扫。
-12. **显示名编码**：`Rel`/`ID` 始终用文件系统原始字节（权限和刮削都绑路径）；
+14. **显示名编码**：`Rel`/`ID` 始终用文件系统原始字节（权限和刮削都绑路径）；
     只有 `Series.Name` / `Book.Title` 经 `displayName` 转换——非 UTF-8 的
     GBK 字节转成中文，合法 UTF-8 原样。zip 条目名按 `NonUTF8` 标志同样处理
     （仅影响显示与自然排序，打开文件仍用原始条目名）。
-13. **自动增量扫描**（0.5.0）：`runScan(auto=true)` 每 `auto_scan_minutes`
+15. **自动增量扫描**（0.5.0）：`runScan(auto=true)` 每 `auto_scan_minutes`
     （默认 10，0 关闭）跑一次。增量体现在两处：`prevBook` 让未变化的压缩包
     沿用页数/元数据；扫描完用 `library.fingerprint()` 对比快照，完全相同就
     丢弃新结果、不替换服务中的库、不写缓存（日志一行 "no changes"）。
@@ -169,18 +181,23 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
 | `/opds/v1.2/catalog` | 根导航：全部系列 + 最近添加 + 书库入口（多根时）+ 系列（分页） |
 | `/opds/v1.2/series` | 全部系列（navigation，分页 `?page=N`，每页 100） |
 | `/opds/v1.2/series/{id}` | 某系列的书籍（acquisition） |
-| `/opds/v1.2/series/{id}/thumbnail` | 系列封面（刮削封面优先） |
+| `/opds/v1.2/series/{id}/thumbnail` | 系列封面缩略图（刮削缩略图优先） |
+| `/opds/v1.2/series/{id}/cover` | 系列封面原图（刮削原图 > 首本书封面原图 > 缩略图兜底） |
 | `/opds/v1.2/lib/{书库名}` | 单个授权目录的系列（多根时） |
 | `/opds/v1.2/recent` | 最新入库 50 本（acquisition） |
 | `/opds/v1.2/books/{id}` | 单书 feed |
 | `/opds/v1.2/books/{id}/file` | 下载；压缩包走 `http.ServeContent`（支持 Range），`dir` 动态打 zip |
-| `/opds/v1.2/books/{id}/thumbnail` | 封面 JPEG（刮削 > 声明 > 首图 > 占位） |
+| `/opds/v1.2/books/{id}/thumbnail` | 封面缩略图 JPEG，最长边 640（刮削 > 声明 > 首图 > 占位） |
+| `/opds/v1.2/books/{id}/cover` | 封面原图（刮削原图 > 提取封面原图 > 缩略图兜底）；图片目录书直接回原文件，压缩包书重编码 q=90 并缓存 |
 | `/opds/v1.2/search?q=` | 书名/系列名/目录/作者/标签/简介子串搜索（空格分词，全部命中；分页）。刮削补全的标题、作者、标签也参与匹配 |
 | `/opds/v1.2/opensearch.xml` | OpenSearch 描述；描述风格书架的搜索入口 |
 | `/api/status` | 登录即可读；含扫描进度 `scan_progress`、异常数 `problems` |
 | `/api/users`、`/api/users/{add,delete,password,perm}` | 仅 NAS 管理员；`perm` 为目录树权限 |
 | `/api/series`、`/api/rescan`、`/api/scan/problems` | 仅 NAS 管理员 |
 | `/api/scrape/{status,search,apply,remove,ignore,auto}` | 仅 NAS 管理员；刮削全流程 |
+| `/api/cover/{manual,upload,manual/clear}` | 仅 NAS 管理员；手动封面（URL 抓取 / multipart 上传 / 清除） |
+| `/api/cover/preview?level=&id=` | 仅 NAS 管理员；管理页封面预览（绕过 OPDS Basic Auth） |
+| `/api/cache/{status,clear}` | 仅 NAS 管理员；封面缓存用量与按 `book`/`series`/`all` 清除 |
 | `/api/log`、`/api/export`、`/api/import` | 仅 NAS 管理员；运维与备份 |
 | `/` | 管理页（相对路径请求 API，兼容网关前缀） |
 
@@ -207,7 +224,8 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
 - acquisition link：`rel="http://opds-spec.org/acquisition"`，
   type 为 `application/vnd.comicbook+zip` / `application/vnd.comicbook-rar` /
   `application/pdf` / `application/zip`。
-- 封面：`rel="http://opds-spec.org/image"` 与 `.../image/thumbnail`。
+- 封面：`rel="http://opds-spec.org/image"` 指向 `/books/{id}/cover`（原图），
+  `rel=".../image/thumbnail"` 指向 `/books/{id}/thumbnail`（640px 缩略图）。
 - 所有 href 用 `baseURL(r)` 生成绝对地址（`http://Host:Port/...`），
   不依赖反向代理头，除 `X-Forwarded-Proto: https` 外不解析别的。
 - **Range 是硬需求**：可达阅读器的「流式阅读」依赖 206 响应，改动下载逻辑时
@@ -246,12 +264,31 @@ library{ roots []string, name, series []*Series, books map[string]*Book,
 
 ### 7.4 封面策略
 
+- 优先级：**手动封面 > 刮削封面 > 声明封面 > 首图 > 占位**。手动与刮削
+  都支持系列/单书两级，单书优先于系列。
 - zip/cbz：按名称自然排序取第一张图片；跳过 `__MACOSX/` 和隐藏文件。
 - 图片目录：取第一张图。
-- cbr/rar：不解析，使用内置占位图（灰卡 + 几何图形，无文字，避免字体依赖）。
-- 解码支持 jpeg/png/gif/bmp/webp；heic/avif 会失败并回退到占位图。
-- 缓存：`$TRIM_PKGVAR/covers/{bookID}.jpg`，mtime 不早于书文件 mtime 时复用。
-- 缩放：最长边 320，CatmullRom，JPEG q=82。
+- cbr/rar：纯 Go 解压取首图；加密、链接条目跳过（详见 §7.14）。
+- 解码支持 jpeg/png/gif/bmp/webp；heic/avif 会失败并回退到占位图
+  （灰卡 + 几何图形，无文字，避免字体依赖）。
+- 手动封面：上传文件或 URL 抓取（≤16MB）先过 `decodeLimited`，统一重编码为
+  JPEG q=90 存 `covers/manual-{level}-{id}.jpg`，并预生成缩略图；记录在
+  `series-meta.json` 的 `manual_covers`（key `series:<id>` / `book:<id>`）。
+  导出配置时把图片以 base64 内嵌进 `manual_covers` 数组，导入时写回文件并
+  重建缩略图（旧版导出文件没有这一项时不影响其他数据恢复）。
+- 缩略图缓存：`$TRIM_PKGVAR/covers/{bookID}.t6.jpg`（`t6` 是渲染规则版本号，
+  改尺寸/画质时换后缀即可让旧缓存惰性重生成，生成时顺手删除旧文件名的缓存），
+  mtime 不早于书文件 mtime 时复用。
+- 原图缓存：`covers/{bookID}.orig.t6.jpg`，压缩包书重编码 JPEG q=90、
+  不缩放；图片目录书不缓存，直接回原文件字节（格式用 `http.DetectContentType` 探测）。
+- 缩放：最长边 640，CatmullRom，JPEG q=82。
+- 缓存生命周期（`cache.go`）：扫描结束后后台清理一次，24 小时节流；删除
+  当前库与元数据都不再引用的文件（删掉的书、旧版本后缀），10 分钟内的新文件
+  跳过，避免误删正在下载/渲染的封面。手动清除同理，但只删可再生产物：
+  **刮削原图与手动封面原图永不删除**。
+- 刮削封面：下载时（`downloadCover`）立即从原图生成 `.t6.jpg` 缩略图；
+  旧版本下载的存量封面在 `scrapedThumbnail()` 首次被请求时从原图惰性生成。
+  原图永远保留在 `covers/scrape-{level}-{id}.jpg`，`/cover` 端点原样回它。
 
 ### 7.5 图片目录的下载
 
@@ -352,7 +389,7 @@ ICON.PNG / ICON_256.PNG / ui/images/icon_{64,256}.png 四个尺寸，否则绘�
    `._-`、≤32 位，`apiAddUser` / `apiImport` / `ensureUsers` 三处入口都校验。
 3. **刮削 ID 穿越（低危）**：`apiScrapeApply/Remove/Ignore` 的 id 会拼进
    封面文件路径，加 `validScrapeID`（hex 字符集、≤64 位）+ `filepath.Base` 兜底
-   （`opds.go:scrapedCoverJPEG`、`scrape.go:metaStore.remove` 同样处理）。
+   （`opds.go:storedCoverFile`、`scrape.go:metaStore.remove` 同样处理）。
 4. **导入绕过权限白名单（低危）**：`apiImport` 恢复用户权限时现在过
    `normalizePermDirs(iu.Dirs, s.grantedDirs())`，备份文件里的越权路径会被清掉。
 
@@ -561,7 +598,7 @@ http://127.0.0.1:15800` 启动实例）在本地 15800 起 mock 数据源，走�
 
 | 项 | 值 |
 |---|---|
-| 已安装版本 | 0.5.1（重装升级；0.3.x 期间用热替换，见下） |
+| 已安装版本 | 0.6.0（重装升级；0.3.x 期间用热替换，见下） |
 | 显示名 | 可达书柜（原名「漫画网关」，0.3.0 更名；appname 保持 `mangagate` 不变） |
 | 端口 | 5080 |
 | 漫画库 | 单个授权目录（示例测试库，5 系列 / 5 本） |

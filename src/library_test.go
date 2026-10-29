@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestNaturalLess(t *testing.T) {
 	}
 }
 
-func TestScanSingleRootKeepsUnprefixedRel(t *testing.T) {
+func TestScanGroupsVolumeDirsIntoParent(t *testing.T) {
 	root := t.TempDir()
 	writeTestCBZ(t, filepath.Join(root, "星海旅人", "第1卷.cbz"), 2)
 	os.MkdirAll(filepath.Join(root, "散图"), 0o755)
@@ -55,21 +56,157 @@ func TestScanSingleRootKeepsUnprefixedRel(t *testing.T) {
 	l := newLibrary([]string{root}, "测试库")
 	l.scan(nil, nil)
 	series, _, _ := l.snapshot()
+
+	loose := findSeriesByRel(series, "/")
+	if loose == nil || loose.Name != "测试库" {
+		var got []string
+		for _, sr := range series {
+			got = append(got, `rel="`+sr.Rel+`" name="`+sr.Name+`"`)
+		}
+		t.Fatalf("loose series should keep the 0.2.x shape (rel /), got %v", got)
+	}
+	if loose.ID != hashID("series:/") {
+		t.Errorf("loose series id changed, breaks saved permissions")
+	}
+	if len(loose.Books) != 2 {
+		t.Errorf("loose series should hold the root image and 散图, got %d books", len(loose.Books))
+	}
+	if findSeriesByRel(series, "星海旅人") == nil {
+		t.Errorf("an archive directory keeps its own series")
+	}
+}
+
+func TestScanGroupsVolumeTrees(t *testing.T) {
+	root := t.TempDir()
+	// A work made of image volumes: 第01卷/番外04 are its books, not series.
+	for _, v := range []string{"第01卷", "第02卷", "番外04"} {
+		for i := 0; i < 3; i++ {
+			p := filepath.Join(root, "蜘蛛", v, string(rune('a'+i))+".jpg")
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, []byte{0xff, 0xd8}, 0o644)
+		}
+	}
+	// An archive series whose image directory is one of its volumes.
+	writeTestCBZ(t, filepath.Join(root, "合集", "孤单话.cbz"), 1)
+	os.MkdirAll(filepath.Join(root, "合集", "番外"), 0o755)
+	os.WriteFile(filepath.Join(root, "合集", "番外", "01.jpg"), []byte{0xff, 0xd8}, 0o644)
+	// A release-group folder above the volumes must not become a series.
+	writeTestCBZ(t, filepath.Join(root, "合集2", "别当欧尼酱了", "KOX", "卷01.cbz"), 1)
+	writeTestCBZ(t, filepath.Join(root, "合集2", "别当欧尼酱了", "KOX", "卷02.cbz"), 1)
+
+	l := newLibrary([]string{root}, "库")
+	l.scan(nil, nil)
+	series, _, _ := l.snapshot()
 	byRel := map[string]*Series{}
 	for _, sr := range series {
 		byRel[sr.Rel] = sr
 	}
-	if byRel["星海旅人"] == nil {
-		t.Fatalf("missing series, got %+v", series)
+
+	for _, sr := range series {
+		if strings.HasPrefix(sr.Rel, "蜘蛛/") {
+			t.Fatalf("volumes of 蜘蛛 must not be series of their own: %q", sr.Rel)
+		}
 	}
-	if byRel["散图"] == nil {
-		t.Fatalf("missing subdir series, got %+v", series)
+	spider := byRel["蜘蛛"]
+	if spider == nil || len(spider.Books) != 3 {
+		t.Fatalf("蜘蛛 should be one series with its three volumes, got %+v", spider)
 	}
-	if byRel["/"] == nil || byRel["/"].Name != "测试库" {
-		t.Errorf("loose series should keep the 0.2.x shape (rel /), got %+v", byRel["/"])
+	if spider.Books[0].Title != "第01卷" || spider.Books[2].Title != "番外04" {
+		t.Errorf("volumes should be in reading order, got %q first", spider.Books[0].Title)
 	}
-	if byRel["/"].ID != hashID("series:/") {
-		t.Errorf("loose series id changed, breaks saved permissions")
+	if byRel["合集"] == nil || len(byRel["合集"].Books) != 2 {
+		t.Fatalf("合集 should hold its archive and the 番外 volume, got %+v", byRel["合集"])
+	}
+	if byRel["合集2/别当欧尼酱了"] == nil {
+		t.Fatalf("别当欧尼酱了 should be a series, got %v", keysOf(byRel))
+	}
+	if byRel["合集2/别当欧尼酱了/KOX"] != nil {
+		t.Errorf("KOX is a release group, not a work")
+	}
+}
+
+func keysOf(m map[string]*Series) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func findSeriesByRel(series []*Series, rel string) *Series {
+	for _, sr := range series {
+		if sr.Rel == rel {
+			return sr
+		}
+	}
+	return nil
+}
+
+func TestScanContainerDirsAreNotSeries(t *testing.T) {
+	root := t.TempDir()
+	// A folder that only groups works must not become a series itself.
+	writeTestCBZ(t, filepath.Join(root, "合集", "一拳超人", "卷01.cbz"), 1)
+	writeTestCBZ(t, filepath.Join(root, "合集", "不死不幸", "卷01.cbz"), 1)
+	// A wrapper around a single work takes that work's name; a release group
+	// folder above the volumes does not survive as a series.
+	writeTestCBZ(t, filepath.Join(root, "别当欧尼酱了", "KOX", "卷01.cbz"), 1)
+	writeTestCBZ(t, filepath.Join(root, "别当欧尼酱了", "KOX", "卷02.cbz"), 1)
+	// A volume folder around a single file is a book of its series.
+	writeTestCBZ(t, filepath.Join(root, "来自深渊", "第01话.cbz"), 1)
+	writeTestCBZ(t, filepath.Join(root, "来自深渊", "第61話", "第61话.cbz"), 1)
+
+	l := newLibrary([]string{root}, "库")
+	l.scan(nil, nil)
+	series, _, _ := l.snapshot()
+	byRel := map[string]*Series{}
+	for _, sr := range series {
+		byRel[sr.Rel] = sr
+	}
+
+	if byRel["合集"] != nil || byRel["别当欧尼酱了/KOX"] != nil {
+		t.Errorf("grouping folders must not become series, got %v", keysOf(byRel))
+	}
+	if byRel["合集/一拳超人"] == nil || byRel["合集/不死不幸"] == nil {
+		t.Errorf("each work inside a container keeps its series, got %v", keysOf(byRel))
+	}
+	wrapped := byRel["别当欧尼酱了"]
+	if wrapped == nil || len(wrapped.Books) != 2 {
+		t.Fatalf("别当欧尼酱了 should be one series with both volumes, got %+v", wrapped)
+	}
+	if wrapped.Books[0].Rel != "别当欧尼酱了/KOX/卷01.cbz" {
+		t.Errorf("the volume keeps its real path, got %q", wrapped.Books[0].Rel)
+	}
+	if deep := byRel["来自深渊"]; deep == nil || len(deep.Books) != 2 {
+		t.Fatalf("来自深渊 should hold both episodes, got %+v", deep)
+	}
+}
+
+func TestIsVolumeName(t *testing.T) {
+	volumes := []string{"第01卷", "第2話", "番外04", "BD特典1", "01卷附页", "第06卷补图与通知", "连载版213", "Vol. 3", "Ch. 12", "12", "[Seaside Scanlations] Vol. 1 Ch. 1"}
+	for _, n := range volumes {
+		if !isVolumeName(n) {
+			t.Errorf("%q should read as a volume", n)
+		}
+	}
+	works := []string{"散图", "漫画A", "别当欧尼酱了", "不过如此", "英雄大全"}
+	for _, n := range works {
+		if isVolumeName(n) {
+			t.Errorf("%q should read as a work name", n)
+		}
+	}
+}
+
+func TestSortBooksPutsSideStoriesLast(t *testing.T) {
+	books := []*Book{{Title: "番外04"}, {Title: "第10卷"}, {Title: "第2卷"}, {Title: "特典1"}}
+	sortBooks(books)
+	var got []string
+	for _, b := range books {
+		got = append(got, b.Title)
+	}
+	want := "第2卷|第10卷|特典1|番外04"
+	if strings.Join(got, "|") != want {
+		t.Errorf("sortBooks = %v, want %s", got, want)
 	}
 }
 
@@ -90,8 +227,9 @@ func TestScanMultiRootPrefixesRel(t *testing.T) {
 	joined := strings.Join(rels, ",")
 	for _, want := range []string{
 		filepath.Base(r1) + "/悬疑",
-		filepath.Base(r2) + "/日常",
-		filepath.Base(r2),
+		// The loose image directory now belongs to its sub-library, which
+		// keeps the unprefixed "/" key so cached grants stay valid.
+		"/",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing prefixed series %q in %v", want, rels)
@@ -99,8 +237,13 @@ func TestScanMultiRootPrefixesRel(t *testing.T) {
 	}
 	// Book rels inherit the prefix so permission grants stay per-library.
 	for _, sr := range series {
-		if sr.Rel != filepath.Base(r2) && !strings.HasPrefix(sr.Rel, filepath.Base(r1)+"/") &&
-			!strings.HasPrefix(sr.Rel, filepath.Base(r2)+"/") {
+		if sr.Rel == "/" {
+			if sr.Name != filepath.Base(r2) {
+				t.Errorf("loose series should be named after sub-library %q, got %q", filepath.Base(r2), sr.Name)
+			}
+			continue
+		}
+		if !strings.HasPrefix(sr.Rel, filepath.Base(r1)+"/") && !strings.HasPrefix(sr.Rel, filepath.Base(r2)+"/") {
 			t.Errorf("unexpected unprefixed rel %q", sr.Rel)
 		}
 	}

@@ -19,6 +19,15 @@ func TestCleanSearchTerm(t *testing.T) {
 		{"[Group] Title (2020) Book 3", "Title"},
 		{"  多  空格  ", "多 空格"},
 		{"第1卷", ""},
+		// Real-world rips: kepub suffix, spaced volume numbers, split volumes
+		// and the 話NNN-NNN ranges that KMoe/Kox use.
+		{"[Kox][一拳超人]話231-235.kepub.epub", "一拳超人"},
+		{"[Kmoe][不死不幸]話170-175.epub", "不死不幸"},
+		{"一之瀨家的大罪卷 01.epub", "一之瀨家的大罪"},
+		{"回復術士的重啟人生卷13_1.epub", "回復術士的重啟人生"},
+		{"[Kox][一拳超人]話166-170[至127擊].kepub.epub", "一拳超人"},
+		{"[Kox][一拳超人]英雄大全.kepub.epub", "英雄大全"},
+		{"[Kox][別當歐尼醬了！]卷01.kepub.epub", "別當歐尼醬了！"},
 	}
 	for _, c := range cases {
 		if got := cleanSearchTerm(c.in); got != c.want {

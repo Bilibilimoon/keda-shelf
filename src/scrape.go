@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,14 @@ type scrapedInfo struct {
 	At        time.Time `json:"at"`
 }
 
+// manualCover is an admin-supplied cover image kept under covers/. It carries
+// no text metadata: it exists only to override the picture for a series or a
+// book when scraping finds nothing usable.
+type manualCover struct {
+	File string    `json:"file"` // base name under covers/
+	At   time.Time `json:"at"`
+}
+
 type metaOverlay struct {
 	Series map[string]*scrapedInfo `json:"series,omitempty"`
 	Books  map[string]*scrapedInfo `json:"books,omitempty"`
@@ -83,6 +92,9 @@ type metaOverlay struct {
 	// batch run; Ignored marks series the admin dismissed.
 	Suggested map[string]*scrapeCandidate `json:"suggested,omitempty"`
 	Ignored   map[string]bool             `json:"ignored,omitempty"`
+	// ManualCovers is keyed "series:<id>" / "book:<id>" and points at the
+	// uploaded or fetched image stored in covers/.
+	ManualCovers map[string]*manualCover `json:"manual_covers,omitempty"`
 }
 
 type metaStore struct {
@@ -231,6 +243,80 @@ func (m *metaStore) replaceOverlay(o metaOverlay) {
 		m.o.Books = map[string]*scrapedInfo{}
 	}
 	_ = m.persist()
+}
+
+// --- manual covers ---
+
+func manualKey(level, id string) string { return level + ":" + id }
+
+// manual returns the admin-supplied cover record for a series or book.
+func (m *metaStore) manual(level, id string) *manualCover {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.o.ManualCovers[manualKey(level, id)]
+}
+
+func (m *metaStore) setManual(level, id, file string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.o.ManualCovers == nil {
+		m.o.ManualCovers = map[string]*manualCover{}
+	}
+	m.o.ManualCovers[manualKey(level, id)] = &manualCover{File: file, At: time.Now()}
+	return m.persist()
+}
+
+// clearManual drops the record and returns the file it pointed at so the
+// caller can delete the image and its derived thumbnail.
+func (m *metaStore) clearManual(level, id string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := manualKey(level, id)
+	c := m.o.ManualCovers[k]
+	if c == nil {
+		return "", nil
+	}
+	delete(m.o.ManualCovers, k)
+	if len(m.o.ManualCovers) == 0 {
+		m.o.ManualCovers = nil
+	}
+	return c.File, m.persist()
+}
+
+// manualCovers copies the manual cover records for export and cache walks.
+func (m *metaStore) manualCovers() map[string]*manualCover {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]*manualCover, len(m.o.ManualCovers))
+	for k, v := range m.o.ManualCovers {
+		out[k] = v
+	}
+	return out
+}
+
+// storedCoverFiles lists every cover image that scrape or manual records
+// reference. Those images are data (they cannot be regenerated offline), so
+// cache cleanup must never delete them.
+func (m *metaStore) storedCoverFiles() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.o.Series)+len(m.o.Books)+len(m.o.ManualCovers))
+	for _, info := range m.o.Series {
+		if info.Cover != "" {
+			out = append(out, info.Cover)
+		}
+	}
+	for _, info := range m.o.Books {
+		if info.Cover != "" {
+			out = append(out, info.Cover)
+		}
+	}
+	for _, c := range m.o.ManualCovers {
+		if c.File != "" {
+			out = append(out, c.File)
+		}
+	}
+	return out
 }
 
 // --- confidence ---
@@ -688,15 +774,32 @@ func downloadCover(hc *http.Client, rawURL, dataDir, name string) (string, error
 	if err := f.Close(); err != nil {
 		return "", err
 	}
-	return name, os.Rename(tmp, file)
+	if err := os.Rename(tmp, file); err != nil {
+		return "", err
+	}
+	// Generate the serving thumbnail up front so the OPDS thumbnail endpoint
+	// never has to decode the full-size image; covers downloaded by older
+	// versions get theirs lazily in storedThumbnail.
+	if raw, err := os.ReadFile(file); err == nil && len(raw) > 0 {
+		if img, err := decodeLimited(bytes.NewReader(raw)); err == nil {
+			if thumb := encodeCover(img); len(thumb) > 0 {
+				_ = os.WriteFile(filepath.Join(coverDir(dataDir), name+"."+coverCacheVer+".jpg"), thumb, 0o644)
+			}
+		}
+	}
+	return name, nil
 }
 
 // --- search-term cleanup ---
 
 var (
-	bracketRe   = regexp.MustCompile(`[\[【（(]([^\]】）)]*)[\]】）)]`)
-	volumeRe    = regexp.MustCompile(`(?i)\s*(第\s*\d+\s*[卷册话話回部]|\d+\s*[卷册话話回部]\s*$|vol\.?\s*\d+\s*$|v\d+\s*$|book\s*\d+\s*$)`)
-	extRe       = regexp.MustCompile(`(?i)\.(epub|pdf|cbz|zip|cbr|rar|cb7)$`)
+	bracketRe = regexp.MustCompile(`[\[【（(]([^\]】）)]*)[\]】）)]`)
+	// volumeRe matches the volume/episode marker of one file or folder:
+	// 第05卷, 卷01, 卷 01, 卷13_1, 話231-235, 2冊, vol.3, v2, book 3.
+	volumeRe = regexp.MustCompile(`(?i)(第\s*\d+\s*[卷册冊话話回部集季]|[卷册冊话話回部集]\s*\d+(?:[._-]\d+)?|\d+\s*[卷册冊话話回部集]|vol\.?\s*\d+|v\d+|book\s*\d+)`)
+	// extRe strips one archive suffix; cleanSearchTerm applies it repeatedly
+	// so the ".kepub.epub" of a converted epub is removed as well.
+	extRe       = regexp.MustCompile(`(?i)\.(epub|kepub|pdf|cbz|zip|cbr|rar|cb7|azw3|mobi)$`)
 	sepNoiseRe  = regexp.MustCompile(`\s*[-_.·]\s*$`)
 	spaceFoldRe = regexp.MustCompile(`\s+`)
 )
@@ -705,10 +808,25 @@ var (
 // file extensions so directory and file names become searchable titles.
 func cleanSearchTerm(name string) string {
 	s := strings.TrimSpace(name)
-	s = extRe.ReplaceAllString(s, "")
+	for {
+		next := extRe.ReplaceAllString(s, "")
+		if next == s {
+			break
+		}
+		s = next
+	}
+	// Many rips keep the title inside brackets ("[Kox][一拳超人]話231-235"),
+	// so remember the CJK bracket groups: when the text outside them is
+	// nothing but volume markers, the title is one of those.
+	var inside []string
+	for _, m := range bracketRe.FindAllStringSubmatch(s, -1) {
+		if len(m) > 1 && hasCJK(m[1]) {
+			inside = append(inside, strings.TrimSpace(m[1]))
+		}
+	}
 	s = bracketRe.ReplaceAllString(s, " ")
-	for i := 0; i < 3; i++ {
-		next := volumeRe.ReplaceAllString(s, "")
+	for i := 0; i < 4; i++ {
+		next := strings.TrimSpace(volumeRe.ReplaceAllString(s, " "))
 		next = strings.TrimSpace(sepNoiseRe.ReplaceAllString(next, ""))
 		if next == s {
 			break
@@ -716,6 +834,24 @@ func cleanSearchTerm(name string) string {
 		s = next
 	}
 	s = strings.TrimSpace(s)
+	if s == "" {
+		for _, cand := range inside {
+			if out := cleanSearchTerm(cand); out != "" {
+				return out
+			}
+		}
+	}
 	s = spaceFoldRe.ReplaceAllString(s, " ")
 	return s
+}
+
+// hasCJK reports whether the text carries Chinese or Japanese characters,
+// which tag a title rather than a release group.
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if r >= 0x3040 && r <= 0x30ff || r >= 0x4e00 && r <= 0x9fff || r >= 0x3400 && r <= 0x4dbf {
+			return true
+		}
+	}
+	return false
 }

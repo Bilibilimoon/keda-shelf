@@ -2,9 +2,13 @@ package main
 
 import (
 	"embed"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -419,6 +423,7 @@ func (s *server) runScan(auto bool) bool {
 				s.prog = nil
 				s.scanMu.Unlock()
 				log.Printf("automatic scan: no changes (%s)", dur.Round(time.Millisecond))
+				s.maybeCleanCoverCache()
 				return
 			}
 		}
@@ -451,6 +456,7 @@ func (s *server) runScan(auto bool) bool {
 		s.lastScan = res
 		s.prog = nil
 		s.scanMu.Unlock()
+		s.maybeCleanCoverCache()
 		if auto {
 			log.Printf("automatic scan: updated library in %s (%d series, %d books)",
 				dur.Round(time.Millisecond), res.Series, res.Books)
@@ -472,51 +478,96 @@ func (s *server) apiLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiExport streams a single JSON bundle with the settings, accounts, scrape
-// matches and a recent log excerpt, so a reinstall can be reconfigured from
-// one file.
+// matches, admin-supplied covers and a recent log excerpt, so a reinstall can
+// be reconfigured from one file.
 func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 	series, _, _ := s.lib.snapshot()
 	stats := map[string]any{
 		"series": len(series),
 		"books":  countBooks(series),
 	}
+	// Manual cover images travel inline: their files live outside the export
+	// directory tree, and without the bytes a reinstall would fall back to the
+	// built-in cover.
+	overlay := s.meta.overlay()
+	overlay.ManualCovers = nil
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition",
 		`attachment; filename="mangagate-export-`+time.Now().Format("20060102-150405")+`.json"`)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(map[string]any{
-		"version":     appVersion,
-		"exported_at": time.Now().Format(time.RFC3339),
-		"config":      s.cfg,
-		"users":       s.users.Users,
-		"scraped":     s.meta.overlay(),
-		"library":     stats,
-		"log_tail":    readLogTail(filepath.Join(s.dataDir, "app.log"), 200),
+		"version":       appVersion,
+		"exported_at":   time.Now().Format(time.RFC3339),
+		"config":        s.cfg,
+		"users":         s.users.Users,
+		"scraped":       overlay,
+		"manual_covers": s.exportManualCovers(),
+		"library":       stats,
+		"log_tail":      readLogTail(filepath.Join(s.dataDir, "app.log"), 200),
 	})
 }
 
-type importPayload struct {
-	Config  *Config      `json:"config"`
-	Users   []User       `json:"users"`
-	Scraped *metaOverlay `json:"scraped"`
+// exportManualCovers serializes the admin-supplied cover images as base64 so
+// an import can recreate both the files and the overrides.
+func (s *server) exportManualCovers() []exportManualCover {
+	out := []exportManualCover{}
+	for key, c := range s.meta.manualCovers() {
+		level, id, ok := strings.Cut(key, ":")
+		if !ok || c.File == "" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(coverDir(s.dataDir), filepath.Base(c.File)))
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		out = append(out, exportManualCover{
+			Level: level,
+			ID:    id,
+			Data:  base64.StdEncoding.EncodeToString(raw),
+			At:    c.At,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Level != out[j].Level {
+			return out[i].Level < out[j].Level
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
-// apiImport restores users (with permissions), scrape matches and the library
-// name from an export file. Ports and granted roots belong to the fnOS
-// platform and are never imported.
+type exportManualCover struct {
+	Level string    `json:"level"`
+	ID    string    `json:"id"`
+	Data  string    `json:"data"` // base64 of the stored image
+	At    time.Time `json:"at"`
+}
+
+type importPayload struct {
+	Config       *Config             `json:"config"`
+	Users        []User              `json:"users"`
+	Scraped      *metaOverlay        `json:"scraped"`
+	ManualCovers []exportManualCover `json:"manual_covers"`
+}
+
+// apiImport restores users (with permissions), scrape matches, manual covers
+// and the library name from an export file. Ports and granted roots belong to
+// the fnOS platform and are never imported.
 func (s *server) apiImport(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Requested-With") != "mangagate" {
 		writeErr(w, http.StatusForbidden, "bad request origin")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	// Manual cover images are embedded as base64 (up to 16 MB each), so the
+	// bundle can exceed the old 8 MB limit by a fair margin.
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<20)
 	var payload importPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeErr(w, http.StatusBadRequest, "导入文件格式不正确")
 		return
 	}
-	if payload.Config == nil && len(payload.Users) == 0 && payload.Scraped == nil {
+	if payload.Config == nil && len(payload.Users) == 0 && payload.Scraped == nil && len(payload.ManualCovers) == 0 {
 		writeErr(w, http.StatusBadRequest, "导入文件里没有可恢复的数据")
 		return
 	}
@@ -554,7 +605,10 @@ func (s *server) apiImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.Scraped != nil {
 		o := *payload.Scraped
-		// Cover images are not part of the export; text metadata survives.
+		// Cover images are not part of the scrape overlay export; text
+		// metadata survives, and the manual_covers array below carries the
+		// admin-supplied images.
+		o.ManualCovers = nil
 		for _, info := range o.Series {
 			info.Cover = ""
 		}
@@ -563,8 +617,26 @@ func (s *server) apiImport(w http.ResponseWriter, r *http.Request) {
 		}
 		s.meta.replaceOverlay(o)
 	}
-	log.Printf("import finished: %d users added, %d updated", added, updated)
-	writeJSON(w, map[string]any{"ok": true, "users_added": added, "users_updated": updated})
+	covers := 0
+	for _, mc := range payload.ManualCovers {
+		if mc.Level != "series" && mc.Level != "book" || !validScrapeID(mc.ID) {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(mc.Data)
+		if err != nil || len(raw) == 0 || len(raw) > manualCoverMaxBytes {
+			log.Printf("import manual cover %s:%s skipped: undecodable or too large", mc.Level, mc.ID)
+			continue
+		}
+		if _, err := s.applyManualCoverBytes(mc.Level, mc.ID, raw); err != nil {
+			log.Printf("import manual cover %s:%s failed: %v", mc.Level, mc.ID, err)
+			continue
+		}
+		covers++
+	}
+	log.Printf("import finished: %d users added, %d updated, %d manual covers", added, updated, covers)
+	writeJSON(w, map[string]any{
+		"ok": true, "users_added": added, "users_updated": updated, "manual_covers": covers,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -615,6 +687,7 @@ type scrapeSeriesRow struct {
 	Books   int    `json:"books"`
 	Term    string `json:"term"`
 	Scraped bool   `json:"scraped"`
+	Manual  bool   `json:"manual"`
 	Title   string `json:"title,omitempty"`
 	Authors string `json:"authors,omitempty"`
 }
@@ -627,6 +700,7 @@ type scrapeBookRow struct {
 	Term       string `json:"term"`
 	Embedded   bool   `json:"embedded"`
 	Scraped    bool   `json:"scraped"`
+	Manual     bool   `json:"manual"`
 	MatchTitle string `json:"match_title,omitempty"`
 }
 
@@ -656,6 +730,7 @@ func (s *server) apiScrapeStatus(w http.ResponseWriter, r *http.Request) {
 			row.Title = info.Title
 			row.Authors = strings.Join(info.Authors, " / ")
 		}
+		row.Manual = s.meta.manual("series", sr.ID) != nil
 		rows = append(rows, row)
 		for _, b := range sr.Books {
 			brow := scrapeBookRow{
@@ -670,6 +745,7 @@ func (s *server) apiScrapeStatus(w http.ResponseWriter, r *http.Request) {
 				brow.Scraped = true
 				brow.MatchTitle = info.Title
 			}
+			brow.Manual = s.meta.manual("book", b.ID) != nil
 			books = append(books, brow)
 		}
 	}
@@ -824,6 +900,242 @@ func (s *server) apiScrapeIgnore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// --- manual covers ---
+
+// validCoverTarget reports whether level/id name something that exists in the
+// library; only real entries can receive an override.
+func (s *server) validCoverTarget(level, id string) bool {
+	if level == "series" {
+		return validScrapeID(id) && s.lib.findSeries(id) != nil
+	}
+	if level == "book" {
+		return validScrapeID(id) && s.lib.findBook(id) != nil
+	}
+	return false
+}
+
+// applyManualCoverBytes stores decoded image bytes as the override for one
+// series or book and removes a previous file when its name changed.
+func (s *server) applyManualCoverBytes(level, id string, raw []byte) (string, error) {
+	old := ""
+	if c := s.meta.manual(level, id); c != nil {
+		old = c.File
+	}
+	name, err := saveManualCover(s.dataDir, level, id, raw)
+	if err != nil {
+		return "", err
+	}
+	if err := s.meta.setManual(level, id, name); err != nil {
+		return "", err
+	}
+	if old != "" && filepath.Base(old) != name {
+		removeStoredCover(s.dataDir, old)
+	}
+	return name, nil
+}
+
+type manualCoverReq struct {
+	Level string `json:"level"`
+	ID    string `json:"id"`
+	URL   string `json:"url"`
+}
+
+// apiCoverManual stores a cover fetched from an image URL.
+func (s *server) apiCoverManual(w http.ResponseWriter, r *http.Request) {
+	var req manualCoverReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !s.validCoverTarget(req.Level, req.ID) {
+		writeErr(w, http.StatusBadRequest, "无效的请求")
+		return
+	}
+	req.URL = strings.TrimSpace(req.URL)
+	u, err := url.Parse(req.URL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		writeErr(w, http.StatusBadRequest, "请填写 http/https 图片地址")
+		return
+	}
+	hreq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, req.URL, nil)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "图片地址无效")
+		return
+	}
+	hreq.Header.Set("User-Agent", "mangagate/"+appVersion)
+	resp, err := newHTTPClient(s.scrapeProxy).Do(hreq)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "下载图片失败："+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		writeErr(w, http.StatusBadGateway, "下载图片失败：HTTP "+itoa(resp.StatusCode))
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, manualCoverMaxBytes+1))
+	if err != nil || len(raw) > manualCoverMaxBytes {
+		writeErr(w, http.StatusBadRequest, "图片过大（上限 16MB）")
+		return
+	}
+	name, err := s.applyManualCoverBytes(req.Level, req.ID, raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "file": name})
+}
+
+// apiCoverUpload stores a cover uploaded from the admin page as multipart
+// form data (fields: level, id, file).
+func (s *server) apiCoverUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Requested-With") != "mangagate" {
+		writeErr(w, http.StatusForbidden, "bad request origin")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, manualCoverMaxBytes+(1<<20))
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeErr(w, http.StatusBadRequest, "上传内容过大或格式不正确")
+		return
+	}
+	level, id := r.FormValue("level"), r.FormValue("id")
+	if !s.validCoverTarget(level, id) {
+		writeErr(w, http.StatusBadRequest, "无效的请求")
+		return
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "请选择图片文件")
+		return
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, manualCoverMaxBytes+1))
+	if err != nil || len(raw) > manualCoverMaxBytes {
+		writeErr(w, http.StatusBadRequest, "图片过大（上限 16MB）")
+		return
+	}
+	name, err := s.applyManualCoverBytes(level, id, raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "file": name})
+}
+
+// apiCoverManualClear drops the override and deletes its image.
+func (s *server) apiCoverManualClear(w http.ResponseWriter, r *http.Request) {
+	var req scrapeRemoveReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Level != "series" && req.Level != "book" || !validScrapeID(req.ID) {
+		writeErr(w, http.StatusBadRequest, "无效的请求")
+		return
+	}
+	file, err := s.meta.clearManual(req.Level, req.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	files, bytes := removeStoredCover(s.dataDir, file)
+	writeJSON(w, map[string]any{"ok": true, "files": files, "bytes": bytes})
+}
+
+// apiCoverPreview serves the thumbnail the feeds currently use for a series or
+// book; the admin page can show it without going through OPDS Basic auth.
+func (s *server) apiCoverPreview(w http.ResponseWriter, r *http.Request) {
+	level, id := r.URL.Query().Get("level"), r.URL.Query().Get("id")
+	var raw []byte
+	switch level {
+	case "series":
+		sr := s.lib.findSeries(id)
+		if sr == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if c := s.meta.manual("series", id); c != nil && c.File != "" {
+			raw = storedCoverThumbnail(coverDir(s.dataDir), c.File)
+		}
+		if len(raw) == 0 {
+			if info := s.meta.series(id); info != nil && info.Cover != "" {
+				raw = storedCoverThumbnail(coverDir(s.dataDir), info.Cover)
+			}
+		}
+		if len(raw) == 0 {
+			var b *Book
+			if sr.Cover != "" {
+				b = s.lib.findBook(sr.Cover)
+			}
+			if b == nil && len(sr.Books) > 0 {
+				b = sr.Books[0]
+			}
+			if b != nil {
+				if raw = s.storedThumbnail(b); len(raw) == 0 {
+					raw = coverJPEG(b, s.dataDir)
+				}
+			}
+		}
+	case "book":
+		b := s.lib.findBook(id)
+		if b == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if raw = s.storedThumbnail(b); len(raw) == 0 {
+			raw = coverJPEG(b, s.dataDir)
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "无效的请求")
+		return
+	}
+	if len(raw) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	_, _ = w.Write(raw)
+}
+
+// --- cover cache ---
+
+func (s *server) apiCacheStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, coverCacheUsage(s.dataDir))
+}
+
+type cacheClearReq struct {
+	Level string `json:"level"`
+	ID    string `json:"id"`
+}
+
+// apiCacheClear removes regenerable cover files. Stored scraped and manual
+// cover images are data and stay; only derived files are deleted.
+func (s *server) apiCacheClear(w http.ResponseWriter, r *http.Request) {
+	var req cacheClearReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	var files int
+	var bytes int64
+	if req.Level == "all" {
+		var err error
+		files, bytes, err = s.clearAllCoverCache()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "清理失败")
+			return
+		}
+	} else {
+		targets, err := s.clearCacheFiles(req.Level, req.ID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		files, bytes = deleteCacheFiles(s.dataDir, targets)
+	}
+	log.Printf("cover cache cleared (%s %s): %d files, %s", req.Level, req.ID, files, humanSize(bytes))
+	writeJSON(w, map[string]any{"ok": true, "files": files, "bytes": bytes})
 }
 
 type autoReq struct {

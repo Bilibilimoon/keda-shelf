@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -123,22 +124,32 @@ func (l *library) scan(prev map[string]*Book, prog *scanProgress) {
 		if len(l.roots) > 1 {
 			prefix = filepath.Base(root)
 		}
-		s, loose := scanDir(root, prefix, 0, st)
-		series = append(series, s...)
+		res := scanDir(root, prefix, 0, scanOpts{root: true, libName: l.name}, st)
+		series = append(series, res.series...)
+		// Image directories directly in the granted folder keep the 0.2.x
+		// shape: each is a series of its own unless the folder itself holds
+		// images, in which case they all join the library's "/" series.
+		var loose []*Book
+		if rootHasImages := len(res.books) > 0 && res.books[0].Rel == prefix; rootHasImages {
+			loose = res.books
+		} else {
+			for _, b := range res.books {
+				sr := makeSeries(hashID("series:"+b.Rel), b.Title, b.Rel)
+				sr.Books = []*Book{b}
+				series = append(series, sr)
+				st.seriesFound(1)
+			}
+		}
 		if len(loose) > 0 {
-			// Single-root keeps the 0.2.x shape ("/", library name) so cached
-			// permission and scrape IDs stay valid; multi-root names the
-			// series after the library root, grantable as a whole.
-			relKey := prefix
+			// Loose books (images or volume directories sitting directly in
+			// the root) stay under the unchanged 0.2.x key "/" so cached
+			// permissions and scrape matches keep working; multi-root only
+			// changes the shown name to the sub-library.
 			name := l.name
 			if prefix != "" {
-				// Rel must keep the original bytes (IDs, permissions and scrape
-				// matches are bound to it); only the shown name is decoded.
 				name = displayName(prefix)
-			} else {
-				relKey = "/"
 			}
-			sr := &Series{ID: hashID("series:" + relKey), Name: name, Rel: relKey}
+			sr := makeSeries(hashID("series:/"), name, "/")
 			l.attach(sr, loose)
 			series = append(series, sr)
 			st.seriesFound(1)
@@ -178,6 +189,17 @@ func (l *library) attach(s *Series, books []*Book) {
 		s.Books = append(s.Books, b)
 	}
 	sort.Slice(s.Books, func(i, j int) bool { return naturalLess(s.Books[i].Title, s.Books[j].Title) })
+}
+
+// ownSeries returns the series scanDir built for the directory rel itself, as
+// opposed to one found in its subdirectories.
+func ownSeries(out []*Series, rel string) *Series {
+	for _, s := range out {
+		if s.Rel == rel {
+			return s
+		}
+	}
+	return nil
 }
 
 func (l *library) snapshot() ([]*Series, map[string]*Book, time.Time) {
@@ -344,22 +366,52 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
-// scanDir returns the series found under abs plus loose image-directory books
-// that belong to the parent's series. rel is the path relative to (and
-// prefixed with) the library root.
-func scanDir(abs, rel string, depth int, st *scanState) ([]*Series, []*Book) {
+// scanWalk is what one directory contributes to the library: the series found
+// inside it, plus image-directory books its parent may take as volumes.
+// scanOpts carries the two things a directory needs to know about its place:
+// whether it is the granted root, and whether the work above it takes every
+// image directory below as one of its volumes.
+type scanOpts struct {
+	root bool
+	// libName names a series built for the granted folder itself (its loose
+	// archives), so it reads as the library instead of the folder name.
+	libName string
+	// absorb means the work above takes every image folder below as a volume.
+	absorb bool
+}
+
+type scanWalk struct {
+	series []*Series
+	books  []*Book
+	// adopted marks a directory that renamed a child work to its own name;
+	// the adopting stops there so "合集2/别当欧尼酱了/KOX" keeps the middle
+	// folder's name.
+	adopted bool
+}
+
+// scanDir walks a directory tree. rel is the path relative to the library
+// root; isRoot marks the granted directory itself.
+//
+// A directory holding archives is a work, and image directories below it are
+// its volumes. A directory of nothing but image directories is a work made of
+// volumes when those directories are named like volumes ("第01卷", "番外04",
+// "BD特典1"); otherwise each of them is a work of its own, which keeps a
+// classic "one folder per comic" library unchanged. A directory wrapping a
+// single work adopts that work's books under its own name, so a release-group
+// folder does not become the series, while a container of many works
+// ("epub格式的漫画") never becomes one itself.
+func scanDir(abs, rel string, depth int, opts scanOpts, st *scanState) scanWalk {
 	if depth > 8 {
-		return nil, nil
+		return scanWalk{}
 	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
 		st.problem(rel, abs, "目录无法读取："+err.Error())
-		return nil, nil
+		return scanWalk{}
 	}
 	st.dirDone()
 
-	var archives, images []os.DirEntry
-	var subdirs []os.DirEntry
+	var archives, images, subdirs []os.DirEntry
 	for _, e := range entries {
 		name := e.Name()
 		if ignoreEntry(name) {
@@ -379,65 +431,175 @@ func scanDir(abs, rel string, depth int, st *scanState) ([]*Series, []*Book) {
 		}
 	}
 
-	var out []*Series
-	var loose []*Book
+	var res scanWalk
+	var subBooks []*Book
+	var sole scanWalk
+	soleOK := len(subdirs) == 1
+	for _, d := range subdirs {
+		// A work above takes every image folder below it as a volume. The
+		// granted root is not a work, so its loose archives must not turn its
+		// folders into volumes.
+		child := scanDir(filepath.Join(abs, d.Name()), path.Join(rel, d.Name()), depth+1,
+			scanOpts{absorb: !opts.root && (len(archives) > 0 || len(images) > 0)}, st)
+		res.series = append(res.series, child.series...)
+		subBooks = append(subBooks, child.books...)
+		sole = child
+	}
+
+	name := displayName(filepath.Base(abs))
+	if opts.root && opts.libName != "" {
+		name = opts.libName
+	}
 
 	if len(archives) > 0 {
-		s := &Series{ID: hashID("series:" + rel), Name: displayName(filepath.Base(abs)), Rel: rel}
-		var books []*Book
+		if opts.absorb && len(archives) == 1 && len(images) == 0 && len(subBooks) == 0 && len(res.series) == 0 && isVolumeName(name) {
+			// "第61話/第61话.pdf": a volume folder around a single file.
+			b := makeBook(abs, path.Join(rel, archives[0].Name()), archives[0].Name(), archiveFormat(archives[0].Name()), st)
+			st.booksFound(1)
+			return scanWalk{books: []*Book{b}}
+		}
+		s := makeSeries(hashID("series:"+rel), name, rel)
 		for _, a := range archives {
-			books = append(books, makeBook(abs, path.Join(rel, a.Name()), a.Name(), archiveFormat(a.Name()), st))
+			s.Books = append(s.Books, makeBook(abs, path.Join(rel, a.Name()), a.Name(), archiveFormat(a.Name()), st))
 		}
-		sort.Slice(books, func(i, j int) bool { return naturalLess(books[i].Title, books[j].Title) })
-		s.Books = books
-		out = append(out, s)
-		st.seriesFound(1)
-		st.booksFound(len(books))
-	}
-
-	if len(images) > 0 && len(archives) == 0 {
-		sort.Slice(images, func(i, j int) bool { return naturalLess(images[i].Name(), images[j].Name()) })
-		stat, _ := images[0].Info()
-		var size int64
-		for _, img := range images {
-			if st2, err := img.Info(); err == nil {
-				size += st2.Size()
-			}
-		}
-		var mod time.Time
-		if stat != nil {
-			mod = stat.ModTime()
-		}
-		loose = append(loose, &Book{
-			ID:      hashID("book:" + rel),
-			Title:   displayName(filepath.Base(abs)),
-			Rel:     rel,
-			Path:    abs,
-			Format:  "dir",
-			Size:    size,
-			Pages:   len(images),
-			ModTime: mod,
-		})
-		st.booksFound(1)
-	}
-
-	for _, d := range subdirs {
-		childRel := path.Join(rel, d.Name())
-		cs, cl := scanDir(filepath.Join(abs, d.Name()), childRel, depth+1, st)
-		out = append(out, cs...)
-		if len(cl) > 0 {
-			s := &Series{ID: hashID("series:" + childRel), Name: displayName(d.Name()), Rel: childRel}
-			for _, b := range cl {
-				b.SeriesID = s.ID
-				s.Books = append(s.Books, b)
-			}
-			out = append(out, s)
+		if opts.root {
+			// The granted folder is not a work: its archives form a series of
+			// their own and the folders beside them stay separate.
 			st.seriesFound(1)
-			st.booksFound(len(cl))
+			st.booksFound(len(s.Books))
+			res.series = append(res.series, s)
+			res.books = subBooks
+			return res
 		}
+		s.Books = append(s.Books, subBooks...)
+		sortBooks(s.Books)
+		st.seriesFound(1)
+		st.booksFound(len(s.Books))
+		res.series = append(res.series, s)
+		return res
 	}
 
-	return out, loose
+	// Images here make one book; the volumes below it are offered together.
+	var offered []*Book
+	if len(images) > 0 {
+		offered = append(offered, imageDirBook(abs, rel, images))
+	}
+	offered = append(offered, subBooks...)
+
+	if len(offered) == 0 {
+		if soleOK && !sole.adopted && len(sole.series) == 1 && len(sole.books) == 0 && !opts.root {
+			// A wrapper around a single work takes that work's books, so a
+			// release-group folder does not become the series.
+			s := makeSeries(hashID("series:"+rel), name, rel)
+			s.Books = sole.series[0].Books
+			res.series = []*Series{s}
+			res.adopted = true
+		}
+		return res
+	}
+
+	if opts.root || opts.absorb || !looksLikeVolumes(offered) {
+		// The caller decides: a work above takes these as its volumes, the
+		// library itself turns each of them into a series of its own.
+		st.booksFound(len(offered))
+		res.books = offered
+		return res
+	}
+
+	s := makeSeries(hashID("series:"+rel), name, rel)
+	s.Books = offered
+	sortBooks(s.Books)
+	st.seriesFound(1)
+	st.booksFound(len(s.Books))
+	res.series = append(res.series, s)
+	return res
+}
+
+// looksLikeVolumes reports whether these image-directory books are the volumes
+// of one work rather than unrelated comics that happen to share a folder.
+func looksLikeVolumes(books []*Book) bool {
+	if len(books) < 2 {
+		return false
+	}
+	n := 0
+	for _, b := range books {
+		if isVolumeName(b.Title) {
+			n++
+		}
+	}
+	return n*2 > len(books)
+}
+
+var (
+	volPrefixRe = regexp.MustCompile(`(?i)^(第\s*[0-9零一二三四五六七八九十百千]+\s*[卷册冊話话回部集季]|(卷|冊|册|話|话|回|部|集)\s*[0-9]+|[0-9]+\s*[卷册冊話话回部集]|vol\.?\s*[0-9]+|ch(?:apter)?\.?\s*[0-9]+|番外|特典|extra|[0-9]+$)`)
+	volWordRe   = regexp.MustCompile(`(?i)(番外|特典|設定集|设定集|画集|畫集|短篇|总集|總集|附录|附錄|连载|連載|更新至)`)
+	sideStoryRe = regexp.MustCompile(`(?i)(番外|特典|短篇|画集|畫集|設定集|设定集|总集|總集)`)
+)
+
+// isVolumeName recognizes folder names that mark one volume of a serialized
+// work: 第01卷, 番外04, BD特典1, 第06卷补图与通知, vol.3, 12.
+func isVolumeName(name string) bool {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return false
+	}
+	if volPrefixRe.MatchString(n) || volWordRe.MatchString(n) {
+		return true
+	}
+	// "[Seaside Scanlations] Vol. 1 Ch. 1": the marker follows the group tag.
+	stripped := strings.TrimSpace(bracketRe.ReplaceAllString(n, " "))
+	if stripped == n {
+		return false
+	}
+	return volPrefixRe.MatchString(stripped) || volWordRe.MatchString(stripped)
+}
+
+// sortBooks keeps a series in reading order: 第2卷 before 第10卷, and the
+// side stories (番外, 特典) after the numbered volumes.
+func sortBooks(books []*Book) {
+	sort.SliceStable(books, func(i, j int) bool {
+		ai, aj := volumeRank(books[i].Title), volumeRank(books[j].Title)
+		if ai != aj {
+			return ai < aj
+		}
+		return naturalLess(books[i].Title, books[j].Title)
+	})
+}
+
+// volumeRank orders main volumes before side story volumes.
+func volumeRank(name string) int {
+	switch {
+	case sideStoryRe.MatchString(name):
+		return 1
+	default:
+		return 0
+	}
+}
+
+// imageDirBook turns the images found directly in a directory into one book.
+func imageDirBook(abs, rel string, images []os.DirEntry) *Book {
+	sort.Slice(images, func(i, j int) bool { return naturalLess(images[i].Name(), images[j].Name()) })
+	first, _ := images[0].Info()
+	var size int64
+	for _, img := range images {
+		if info, err := img.Info(); err == nil {
+			size += info.Size()
+		}
+	}
+	var mod time.Time
+	if first != nil {
+		mod = first.ModTime()
+	}
+	return &Book{
+		ID:      hashID("book:" + rel),
+		Title:   displayName(filepath.Base(abs)),
+		Rel:     rel,
+		Path:    abs,
+		Format:  "dir",
+		Size:    size,
+		Pages:   len(images),
+		ModTime: mod,
+	}
 }
 
 func makeBook(dir, rel, name, format string, st *scanState) *Book {
@@ -537,3 +699,9 @@ func naturalLess(a, b string) bool {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// makeSeries builds a series; kept in one place so the three fields cannot
+// drift apart when the struct grows.
+func makeSeries(id, name, rel string) *Series {
+	return &Series{ID: id, Name: name, Rel: rel}
+}

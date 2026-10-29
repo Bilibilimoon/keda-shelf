@@ -22,7 +22,12 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-const coverMaxSide = 320
+const coverMaxSide = 640
+
+// coverCacheVer is part of generated cache file names; bumping it makes
+// clients lazily regenerate at the new rendering rule while the files under
+// the previous name are removed on that same pass.
+const coverCacheVer = "t6"
 
 // maxRarEntries bounds how far a cover lookup walks a RAR archive, so a
 // pathological archive with thousands of non-image entries cannot stall the
@@ -36,6 +41,10 @@ const (
 	decodeMaxPixels = 40_000_000 // larger than 8K; any real comic page fits
 )
 
+// manualCoverMaxBytes bounds an admin-supplied cover, whether uploaded or
+// fetched from a URL, before it is decoded.
+const manualCoverMaxBytes = 16 << 20
+
 // Per-book locks plus a small global pool let several covers render at once
 // without letting image decoding saturate every core.
 var (
@@ -45,10 +54,134 @@ var (
 
 func coverDir(dataDir string) string { return filepath.Join(dataDir, "covers") }
 
+// thumbName is the derived thumbnail file name for a stored cover image. The
+// separator keeps it from colliding with the book cache names, which embed the
+// version suffix in the middle.
+func thumbName(file string) string { return file + "." + coverCacheVer + ".jpg" }
+
+// bookCacheKeys lists the cache key variants one book may have used: the plain
+// ID, the RAR suffix from before RAR covers were supported, and the declared
+// cover suffix. Switching format or adding a declared cover leaves the
+// previous slot behind, so cleanup must be able to reach all of them.
+func bookCacheKeys(b *Book) []string {
+	if b == nil {
+		return nil
+	}
+	keys := []string{b.ID}
+	if b.Format == "cbr" || b.Format == "rar" {
+		keys = append(keys, b.ID+"-rar1")
+	}
+	if b.Meta != nil && b.Meta.CoverEntry != "" {
+		keys = append(keys, b.ID+"-m")
+	}
+	return keys
+}
+
+// bookCacheNames lists the cache files the current renderer creates for a book
+// (thumbnail and original). The valid set for automatic cleanup is built from
+// these, so pre-t6 legacy files are deliberately absent and get swept.
+func bookCacheNames(b *Book) []string {
+	keys := bookCacheKeys(b)
+	names := make([]string, 0, len(keys)*2)
+	for _, k := range keys {
+		names = append(names, k+"."+coverCacheVer+".jpg", k+".orig."+coverCacheVer+".jpg")
+	}
+	return names
+}
+
+// bookCacheLegacyNames lists cache names written by versions before the
+// version suffix existed; they are safe to delete on a cleanup pass.
+func bookCacheLegacyNames(b *Book) []string {
+	keys := bookCacheKeys(b)
+	names := make([]string, 0, len(keys))
+	for _, k := range keys {
+		names = append(names, k+".jpg")
+	}
+	return names
+}
+
+// encodeOriginalJPEG re-encodes a full-size cover for storage and serving.
+func encodeOriginalJPEG(img image.Image) []byte {
+	var buf bytes.Buffer
+	if jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}) != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// writeFileAtomic writes via a temporary name so a crash or a concurrent
+// reader never sees a half-written cover.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// saveManualCover validates admin-supplied image bytes, stores them re-encoded
+// as a full-size JPEG under covers/ and writes the serving thumbnail. Encoding
+// instead of storing the upload verbatim keeps the image cache uniform and
+// rejects anything that is not a decodable image.
+func saveManualCover(dataDir, level, id string, raw []byte) (string, error) {
+	img, err := decodeLimited(bytes.NewReader(raw))
+	if err != nil {
+		return "", errors.New("无法识别该图片")
+	}
+	out := encodeOriginalJPEG(img)
+	if len(out) == 0 {
+		return "", errors.New("图片编码失败")
+	}
+	dir := coverDir(dataDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	name := "manual-" + level + "-" + id + ".jpg"
+	if err := writeFileAtomic(filepath.Join(dir, name), out); err != nil {
+		return "", err
+	}
+	if thumb := encodeCover(img); len(thumb) > 0 {
+		_ = os.WriteFile(filepath.Join(dir, thumbName(name)), thumb, 0o644)
+	}
+	return name, nil
+}
+
+// removeStoredCover deletes a stored cover image and its thumbnail, returning
+// the number of files and bytes removed.
+func removeStoredCover(dataDir, file string) (int, int64) {
+	if file == "" {
+		return 0, 0
+	}
+	dir := coverDir(dataDir)
+	files, varBytes := 0, int64(0)
+	for _, name := range []string{filepath.Base(file), thumbName(filepath.Base(file))} {
+		p := filepath.Join(dir, name)
+		if st, err := os.Stat(p); err == nil {
+			if os.Remove(p) == nil {
+				files++
+				varBytes += st.Size()
+			}
+		}
+	}
+	return files, varBytes
+}
+
 // coverJPEG returns a cached cover for the book, generating it if needed.
 func coverJPEG(b *Book, dataDir string) []byte {
+	return cachedCoverJPEG(b, dataDir, "")
+}
+
+// coverOriginalJPEG returns the full-size cover extracted from the book,
+// re-encoded to a high-quality JPEG and cached; it does not apply
+// coverMaxSide. The extra key component separates its cache slot from the
+// thumbnail one.
+func coverOriginalJPEG(b *Book, dataDir string) []byte {
+	return cachedCoverJPEG(b, dataDir, ".orig")
+}
+
+func cachedCoverJPEG(b *Book, dataDir, slot string) []byte {
 	if b == nil {
-		return placeholderJPEG(b.Title)
+		return placeholderJPEG("")
 	}
 	key := b.ID
 	if b.Format == "cbr" || b.Format == "rar" {
@@ -61,8 +194,9 @@ func coverJPEG(b *Book, dataDir string) []byte {
 		// first-image cover to the declared one invalidates the old cache.
 		key = b.ID + "-m"
 	}
-	cache := filepath.Join(coverDir(dataDir), key+".jpg")
-	anyMu, _ := coverLocks.LoadOrStore(key, &sync.Mutex{})
+	dir := coverDir(dataDir)
+	cache := filepath.Join(dir, key+slot+"."+coverCacheVer+".jpg")
+	anyMu, _ := coverLocks.LoadOrStore(key+slot, &sync.Mutex{})
 	mu := anyMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -72,18 +206,39 @@ func coverJPEG(b *Book, dataDir string) []byte {
 		}
 	}
 
-	coverSem <- struct{}{}
-	img := extractCoverImage(b)
-	<-coverSem
+	var img image.Image
+	if slot == ".orig" {
+		// Full-size output does not go through the downscaler.
+		if raw := extractCoverBytes(b); raw != nil {
+			return raw
+		}
+		coverSem <- struct{}{}
+		img = extractCoverImage(b)
+		<-coverSem
+	} else {
+		coverSem <- struct{}{}
+		img = extractCoverImage(b)
+		<-coverSem
+	}
 	var out []byte
 	if img != nil {
-		out = encodeCover(img)
+		if slot == ".orig" {
+			out = encodeOriginalJPEG(img)
+		} else {
+			out = encodeCover(img)
+		}
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && slot != ".orig" {
 		out = placeholderJPEG(b.Title)
 	}
-	if err := os.MkdirAll(coverDir(dataDir), 0o755); err == nil {
-		_ = os.WriteFile(cache, out, 0o644)
+	if len(out) > 0 {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			_ = os.WriteFile(cache, out, 0o644)
+			if slot == "" {
+				// Drop the pre-t6 cache file once the new one exists.
+				_ = os.Remove(filepath.Join(dir, key+".jpg"))
+			}
+		}
 	}
 	return out
 }
@@ -173,6 +328,48 @@ func firstImageInDir(dir string) image.Image {
 		}
 	}
 	return nil
+}
+
+// firstImageDirFile returns the path of the first renderable image in a
+// directory book, using the same ordering as firstImageInDir.
+func firstImageDirFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || ignoreEntry(e.Name()) || !isImageName(e.Name()) {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Slice(names, func(i, j int) bool { return naturalLess(names[i], names[j]) })
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		if _, err := decodeImageFile(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// extractCoverBytes returns the raw bytes of a directory book's cover file so
+// the original endpoint can serve it untouched; archive books have no single
+// raw file to point at and get nil.
+func extractCoverBytes(b *Book) []byte {
+	if b == nil || b.Format != "dir" {
+		return nil
+	}
+	p := firstImageDirFile(b.Path)
+	if p == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 func firstImageInZip(file string) image.Image {

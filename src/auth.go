@@ -28,6 +28,9 @@ type server struct {
 	tlsOn     bool
 	meta      *metaStore
 	scrape    scraper
+	// scrapeProxy is reused for manual cover fetches so image URLs reachable
+	// only through the configured proxy also work from the admin page.
+	scrapeProxy string
 
 	scanMu   sync.Mutex
 	scanning bool
@@ -35,6 +38,10 @@ type server struct {
 	lastScan *scanResult
 	// scanEvery is the periodic incremental rescan period; zero disables it.
 	scanEvery time.Duration
+
+	// cleanMu guards lastClean, the timestamp of the last stale-cover sweep.
+	cleanMu   sync.Mutex
+	lastClean time.Time
 
 	autoMu      sync.Mutex
 	autoRunning bool

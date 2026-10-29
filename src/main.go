@@ -18,7 +18,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const appVersion = "0.5.1"
+const appVersion = "0.6.0"
 const appSlug = "mangagate"
 
 func main() {
@@ -122,19 +122,20 @@ func main() {
 	}
 
 	s := &server{
-		cfg:       cfg,
-		users:     users,
-		configDir: *configDir,
-		dataDir:   *dataDir,
-		lib:       lib,
-		limiter:   newRateLimiter(),
-		roots:     roots,
-		port:      port,
-		started:   time.Now(),
-		tlsOn:     tlsCfg != nil,
-		meta:      loadMetaStore(filepath.Join(*dataDir, "series-meta.json"), *dataDir),
-		scrape:    newScraper(*scrapeSrc, *scrapeBase, *scrapePx),
-		scanEvery: autoScanInterval(cfg),
+		cfg:         cfg,
+		users:       users,
+		configDir:   *configDir,
+		dataDir:     *dataDir,
+		lib:         lib,
+		limiter:     newRateLimiter(),
+		roots:       roots,
+		port:        port,
+		started:     time.Now(),
+		tlsOn:       tlsCfg != nil,
+		meta:        loadMetaStore(filepath.Join(*dataDir, "series-meta.json"), *dataDir),
+		scrape:      newScraper(*scrapeSrc, *scrapeBase, *scrapePx),
+		scrapeProxy: *scrapePx,
+		scanEvery:   autoScanInterval(cfg),
 	}
 
 	if *scanOnly {
@@ -145,6 +146,10 @@ func main() {
 	// in the background; unchanged archives skip the page recount.
 	if libFromCache {
 		s.startScan()
+	} else {
+		// The startup scan above already finished; sweep stale cover files left
+		// by earlier versions or by books removed since the last run.
+		s.maybeCleanCoverCache()
 	}
 	if s.scanEvery > 0 {
 		log.Printf("automatic incremental scan every %s", s.scanEvery)
@@ -253,6 +258,12 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/api/scrape/remove", s.adminOnly(s.apiScrapeRemove))
 	mux.HandleFunc("/api/scrape/ignore", s.adminOnly(s.apiScrapeIgnore))
 	mux.HandleFunc("/api/scrape/auto", s.adminOnly(s.apiScrapeAuto))
+	mux.HandleFunc("/api/cover/manual", s.adminOnly(s.apiCoverManual))
+	mux.HandleFunc("/api/cover/upload", s.adminOnly(s.apiCoverUpload))
+	mux.HandleFunc("/api/cover/manual/clear", s.adminOnly(s.apiCoverManualClear))
+	mux.HandleFunc("/api/cover/preview", s.adminOnly(s.apiCoverPreview))
+	mux.HandleFunc("/api/cache/status", s.adminOnly(s.apiCacheStatus))
+	mux.HandleFunc("/api/cache/clear", s.adminOnly(s.apiCacheClear))
 	mux.HandleFunc("/", s.handleAdminPage)
 	return mux
 }
